@@ -55,6 +55,10 @@ QtObject {
     }
     onFailed: function(message, origin) {
       if (origin && origin !== root.origin) return
+      // A keyring miss is expected during unauthenticated connect; the bridge
+      // surfaces the "auth required" signal if the server actually needs one.
+      // Credential write/clear errors still surface.
+      if (String(message).indexOf("No credential stored") === 0) return
       root.lastError = message
       root.lastErrorKind = "credential"
     }
@@ -119,12 +123,17 @@ QtObject {
 
   function applyConfig(text) {
     var cfg = ConfigStore.parse(text)
+    // Skip reconciliation when the file echoes the current settings
+    // (saveConfig's own write hits onFileChanged) so a player selection or
+    // connect doesn't tear down and redial the bridge for nothing.
+    var dirty = cfg.host !== root.host || cfg.port !== root.port
+      || cfg.playerId !== root.playerId || cfg.demoMode !== root.demoMode
     root.host = cfg.host
     root.port = cfg.port
     root.playerId = cfg.playerId
     root.demoMode = cfg.demoMode
-    root.activePlayerId = cfg.playerId
-    root.reconcile()
+    if (cfg.playerId) root.activePlayerId = cfg.playerId
+    if (dirty) root.reconcile()
   }
 
   // ------------------------------------------------------------ reconciliation
@@ -138,14 +147,12 @@ QtObject {
       return
     }
     bridgeController.ensureStarted()
-    if (!root.demoMode && root.origin && !root.password) {
-      // Try the keyring; a miss just connects unauthenticated (LMS may not
-      // require auth) and the bridge reports errorKind "auth" if it does.
-      root.storedCredentialForm = ""
-      credentials.lookup(root.origin)
-      return
-    }
+    // Connect with whatever is in memory. With no password, connect
+    // unauthenticated right away (if LMS requires auth the bridge reports
+    // errorKind "auth") and look the keyring up in parallel to upgrade later.
     root.pushConfig()
+    if (!root.demoMode && root.origin && !root.password)
+      credentials.lookup(root.origin)
   }
 
   function pushConfig() {

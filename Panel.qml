@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Ui
@@ -17,18 +16,19 @@ Panel {
   readonly property bool serviceReady: lms !== null
   readonly property string phase: serviceReady ? lms.phase : "idle"
 
+  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color dim: Qt.darker(fg, 1.4)
+  readonly property color selectedFill: Style.selectedFillFor(fg, Color.accent)
+
   function openSettings() {
     if (!bar || !bar.shell || typeof bar.shell.summon !== "function") return
     close()
     bar.shell.summon("io.github.powerk1977.lms", JSON.stringify({ tab: "connection" }))
   }
 
-  readonly property color iconColor: {
-    var base = bar ? bar.barForeground : Color.foreground
-    return root.phase === "connected" ? base : Qt.darker(base, 1.5)
-  }
-  readonly property color barIconColor: root.phase === "error"
-    ? (bar ? bar.urgent : Color.urgent) : root.iconColor
+  readonly property color iconColor: phase === "connected" ? fg : Qt.darker(fg, 1.5)
+  readonly property color barIconColor: phase === "error"
+    ? (bar ? bar.urgent : Color.urgent) : iconColor
 
   onOpenedChanged: if (opened && root.serviceReady) root.lms.refresh()
 
@@ -116,14 +116,14 @@ Panel {
         Column {
           id: content
           width: parent.width
-          spacing: Style.space(10)
+          spacing: Style.spacing.md
 
           // ---- not configured / error ----
           Text {
             width: parent.width
             visible: !root.serviceReady || !root.lms.configured
             text: root.serviceReady ? "No Lyrion server configured" : "Service unavailable"
-            color: Color.foreground
+            color: root.fg
             wrapMode: Text.WordWrap
           }
           Text {
@@ -137,37 +137,21 @@ Panel {
           // ---- player picker ----
           Column {
             width: parent.width
-            spacing: Style.space(4)
+            spacing: Style.spacing.sm
             visible: root.serviceReady && root.lms.players.length > 0
+            PanelSectionHeader {
+              text: "Players"
+              color: root.fg
+            }
             Repeater {
               model: root.serviceReady ? root.lms.players : []
-              delegate: Rectangle {
+              delegate: Button {
                 required property var modelData
                 width: parent.width
-                height: Style.space(32)
-                radius: Style.space(6)
-                color: modelData.playerid === root.lms.activePlayerId
-                  ? (bar ? bar.urgent : Color.accent) : "transparent"
-                Row {
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(8)
-                  anchors.rightMargin: Style.space(8)
-                  spacing: Style.space(6)
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: modelData.isgroup ? "\u2637" : (modelData.isplaying ? "\u25B6" : "\u25A0")
-                    color: Color.foreground
-                  }
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: modelData.name + (modelData.isgroup ? "  (group)" : "")
-                    color: Color.foreground
-                  }
-                }
-                MouseArea {
-                  anchors.fill: parent
-                  onClicked: root.lms.selectPlayer(modelData.playerid)
-                }
+                text: modelData.name + (modelData.isgroup ? "  (group)" : "")
+                iconText: modelData.isplaying ? "\u25B6" : "\u25A0"
+                selected: modelData.playerid === root.lms.activePlayerId
+                onClicked: root.lms.selectPlayer(modelData.playerid)
               }
             }
           }
@@ -175,38 +159,54 @@ Panel {
           // ---- now playing ----
           Row {
             width: parent.width
-            spacing: Style.space(10)
+            spacing: Style.spacing.md
             visible: root.serviceReady && root.lms.configured
-            Image {
+            Rectangle {
               width: Style.space(64)
               height: Style.space(64)
-              source: root.lms.coverUrl
-              fillMode: Image.PreserveAspectFit
-              asynchronous: true
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.fg, Color.accent)
+              clip: true
+              Image {
+                anchors.fill: parent
+                source: root.lms.coverUrl
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                visible: root.lms.coverUrl !== ""
+              }
+              Text {
+                anchors.centerIn: parent
+                text: "\u266A"
+                color: root.dim
+                font.pixelSize: Style.space(24)
+                visible: root.lms.coverUrl === ""
+              }
             }
             Column {
               width: parent.width - Style.space(74)
-              spacing: Style.space(2)
+              spacing: Style.spacing.xs
               Text {
                 width: parent.width
                 text: root.lms.title || "—"
-                color: Color.foreground
+                color: root.fg
                 elide: Text.ElideRight
                 font.bold: true
+                font.pixelSize: Style.font.body
               }
               Text {
                 width: parent.width
                 text: root.lms.artist || ""
-                color: Color.foreground
-                opacity: 0.7
+                color: root.dim
                 elide: Text.ElideRight
+                font.pixelSize: Style.font.body
               }
               Text {
                 width: parent.width
                 text: root.lms.nowplaying.album || ""
-                color: Color.foreground
-                opacity: 0.5
+                color: root.dim
+                opacity: 0.7
                 elide: Text.ElideRight
+                font.pixelSize: Style.font.caption
               }
             }
           }
@@ -214,63 +214,65 @@ Panel {
           // ---- transport ----
           Row {
             width: parent.width
-            spacing: Style.space(16)
-            visible: root.serviceReady && root.lms.configured
-            Repeater {
-              model: [
-                { glyph: "\u23EE", tag: "prev" },
-                { glyph: root.lms.playing ? "\u23F8" : "\u25B6", tag: "play" },
-                { glyph: "\u23ED", tag: "next" }
-              ]
-              delegate: Text {
-                required property var modelData
-                text: modelData.glyph
-                color: Color.foreground
-                font.pixelSize: Style.space(22)
-                MouseArea {
-                  anchors.fill: parent
-                  anchors.margins: -Style.space(4)
-                  onClicked: {
-                    if (modelData.tag === "prev") root.lms.previous()
-                    else if (modelData.tag === "next") root.lms.next()
-                    else root.lms.togglePlay()
-                  }
-                }
-              }
+            spacing: Style.spacing.lg
+            visible: root.serviceReady && root.lms.configured && root.lms.players.length > 0
+            PanelActionButton {
+              iconText: "\u23EE"          // previous
+              size: Style.space(34)
+              bordered: true
+              onClicked: root.lms.previous()
+            }
+            PanelActionButton {
+              iconText: root.lms.playing ? "\u23F8" : "\u25B6"   // pause / play
+              size: Style.space(40)
+              bordered: true
+              foreground: Color.accent
+              onClicked: root.lms.togglePlay()
+            }
+            PanelActionButton {
+              iconText: "\u23ED"          // next
+              size: Style.space(34)
+              bordered: true
+              onClicked: root.lms.next()
             }
           }
 
           // ---- volume ----
           Row {
             width: parent.width
-            spacing: Style.space(8)
+            spacing: Style.spacing.md
             visible: root.serviceReady && root.lms.configured
-            Text { text: "\U0001F50A"; color: Color.foreground }
-            Slider {
+            Text {
+              text: "\U0001F50A"
+              color: root.fg
+              font.pixelSize: Style.font.body
+              verticalAlignment: Text.AlignVCenter
+            }
+            PanelSlider {
               id: volume
-              width: parent.width - Style.space(40)
-              from: 0
-              to: 100
+              width: parent.width - Style.space(28)
+              bar: root.bar
               value: root.lms.nowplaying.volume || 0
-              onMoved: root.lms.setVolume(value)
+              minimum: 0
+              maximum: 100
+              integer: true
+              onMoved: function(v) { root.lms.setVolume(v) }
             }
           }
 
           // ---- actions ----
           Row {
             width: parent.width
-            spacing: Style.space(16)
-            Text {
+            spacing: Style.spacing.md
+            Button {
+              bordered: true
               text: "Refresh"
-              color: Color.foreground
-              opacity: 0.8
-              MouseArea { anchors.fill: parent; onClicked: root.lms.refresh() }
+              onClicked: root.lms.refresh()
             }
-            Text {
+            Button {
+              bordered: true
               text: "Settings"
-              color: Color.foreground
-              opacity: 0.8
-              MouseArea { anchors.fill: parent; onClicked: root.openSettings() }
+              onClicked: root.openSettings()
             }
           }
         }

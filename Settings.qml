@@ -2,7 +2,6 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
-import QtQuick.Controls
 import qs.Commons
 import qs.Ui
 
@@ -28,7 +27,7 @@ Item {
   property string passwordDraft: ""
   property bool demoDraft: false
 
-  readonly property string family: Style.font.menuFamily
+  readonly property string family: Style.font.family
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
   readonly property var borderSpec: Border.surfaceSpec(
@@ -131,134 +130,155 @@ Item {
           Column {
             id: column
             width: parent.width
-            spacing: Style.space(12)
+            spacing: Style.spacing.lg
 
-            Text {
+            PanelSectionHeader {
               text: "Lyrion Music Server"
+              fontSize: Style.font.subtitle
               color: root.foreground
-              font.family: root.family
-              font.bold: true
-              font.pixelSize: Style.space(18)
             }
 
-            Grid {
-              columns: 3
-              rowSpacing: Style.space(8)
-              columnSpacing: Style.space(8)
+            // ---- server fields ----
+            Column {
               width: parent.width
+              spacing: Style.spacing.md
 
-              Text {
-                text: "Host"
-                color: root.foreground
-                opacity: 0.8
-                width: Style.space(90)
-                verticalAlignment: Text.AlignVCenter
-              }
-              TextField {
-                width: Style.space(150)
-                text: root.hostDraft
-                onTextChanged: root.hostDraft = text
-                placeholderText: "192.168.1.50"
-              }
-              Item { width: Style.space(90); height: 1 }
-
-              Text {
-                text: "Port"
-                color: root.foreground
-                opacity: 0.8
-                width: Style.space(90)
-                verticalAlignment: Text.AlignVCenter
-              }
-              SpinBox {
-                from: 1
-                to: 65535
-                value: root.portDraft
-                editable: true
-                onValueModified: root.portDraft = value
-              }
-              Text {
-                text: "(LMS defaults to 9000)"
-                color: root.foreground
-                opacity: 0.5
-                width: Style.space(90)
-                verticalAlignment: Text.AlignVCenter
+              Row {
+                width: parent.width
+                spacing: Style.spacing.md
+                Text {
+                  width: Style.space(90)
+                  verticalAlignment: Text.AlignVCenter
+                  text: "Host"
+                  color: root.foreground
+                  opacity: 0.8
+                  font.family: root.family
+                  font.pixelSize: Style.font.body
+                }
+                TextField {
+                  width: parent.width - Style.space(90)
+                  text: root.hostDraft
+                  onTextChanged: root.hostDraft = text
+                  placeholderText: "192.168.1.50"
+                }
               }
 
-              Text {
-                text: "Username"
-                color: root.foreground
-                opacity: 0.8
-                width: Style.space(90)
-                verticalAlignment: Text.AlignVCenter
+              Row {
+                width: parent.width
+                spacing: Style.spacing.md
+                Text {
+                  width: Style.space(90)
+                  verticalAlignment: Text.AlignVCenter
+                  text: "Port"
+                  color: root.foreground
+                  opacity: 0.8
+                  font.family: root.family
+                  font.pixelSize: Style.font.body
+                }
+                NumberField {
+                  width: parent.width - Style.space(90)
+                  label: ""
+                  value: root.portDraft
+                  from: 1
+                  to: 65535
+                  onModified: function(v) { root.portDraft = v }
+                }
               }
-              TextField {
-                width: Style.space(150)
-                text: root.userDraft
-                onTextChanged: root.userDraft = text
-                placeholderText: "optional"
-              }
-              Item { width: Style.space(90); height: 1 }
 
-              Text {
-                text: "Password"
-                color: root.foreground
-                opacity: 0.8
-                width: Style.space(90)
-                verticalAlignment: Text.AlignVCenter
+              Row {
+                width: parent.width
+                spacing: Style.spacing.md
+                Text {
+                  width: Style.space(90)
+                  verticalAlignment: Text.AlignVCenter
+                  text: "Username"
+                  color: root.foreground
+                  opacity: 0.8
+                  font.family: root.family
+                  font.pixelSize: Style.font.body
+                }
+                TextField {
+                  width: parent.width - Style.space(90)
+                  text: root.userDraft
+                  onTextChanged: root.userDraft = text
+                  placeholderText: "optional"
+                }
               }
-              TextField {
-                width: Style.space(150)
-                text: root.passwordDraft
-                onTextChanged: root.passwordDraft = text
-                echoMode: TextInput.Password
-                placeholderText: "keyring-only"
+
+              Row {
+                width: parent.width
+                spacing: Style.spacing.md
+                Text {
+                  width: Style.space(90)
+                  verticalAlignment: Text.AlignVCenter
+                  text: "Password"
+                  color: root.foreground
+                  opacity: 0.8
+                  font.family: root.family
+                  font.pixelSize: Style.font.body
+                }
+                TextField {
+                  width: parent.width - Style.space(90)
+                  text: root.passwordDraft
+                  onTextChanged: root.passwordDraft = text
+                  password: true
+                  placeholderText: "keyring-only"
+                }
               }
-              CheckBox {
-                text: "Demo mode"
+
+              Toggle {
+                label: "Demo mode"
                 checked: root.demoDraft
-                onCheckedChanged: root.demoDraft = checked
-                width: Style.space(90)
+                onClicked: root.demoDraft = !root.demoDraft
               }
             }
 
+            // ---- actions ----
             Row {
-              spacing: Style.space(8)
-              Button { text: "Connect"; onClicked: root.applyConnection() }
-              Button { text: "Discover"; onClicked: if (root.service) root.service.discover() }
+              spacing: Style.spacing.md
               Button {
+                bordered: true
+                text: "Connect"
+                onClicked: root.applyConnection()
+              }
+              Button {
+                bordered: true
+                text: "Discover"
+                onClicked: function() { if (root.service) root.service.discover() }
+              }
+              Button {
+                bordered: true
                 text: "Forget password"
                 enabled: root.canForget
                 onClicked: root.forgetCredential()
               }
             }
 
-            // Discovery results.
+            // ---- discovery results ----
             Column {
               width: parent.width
-              spacing: Style.space(4)
-              visible: root.service && root.service.serversFound && root.service.serversFound.length > 0
-              Text {
-                text: "Discovered servers (tap to fill):"
+              spacing: Style.spacing.sm
+              visible: root.service && root.service.serversFound
+                && root.service.serversFound.length > 0
+              PanelSectionHeader {
+                text: "Discovered servers (tap to fill)"
                 color: root.foreground
-                opacity: 0.7
               }
               Repeater {
                 model: root.service ? root.service.serversFound : []
-                delegate: Text {
+                delegate: Button {
                   required property var modelData
                   width: parent.width
-                  text: modelData.name + "  " + modelData.host + ":" + (modelData.port || 9000)
+                  text: modelData.name + "  " + modelData.host + ":"
+                    + (modelData.port || 9000)
                     + (modelData.authRequired ? "  (password)" : "")
-                  color: root.foreground
-                  MouseArea {
-                    anchors.fill: parent
-                    onClicked: root.useServer(modelData)
-                  }
+                  leftAlign: true
+                  onClicked: root.useServer(modelData)
                 }
               }
             }
 
-            // Status.
+            // ---- status ----
             Text {
               width: parent.width
               visible: root.service && root.service.phase !== ""
@@ -270,6 +290,8 @@ Item {
               }
               color: root.service && root.service.phase === "error"
                 ? Color.urgent : root.foreground
+              font.family: root.family
+              font.pixelSize: Style.font.body
               wrapMode: Text.WordWrap
             }
           }

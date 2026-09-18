@@ -14,7 +14,8 @@ function hostName(value) {
 }
 
 function portNumber(value) {
-  var n = parseInt(value, 10)
+  // Locale-formatted input ("9,000", "9 000") must not parse to 9.
+  var n = parseInt(String(value).replace(/[,.\s]/g, ""), 10)
   if (!isFinite(n) || n < 1 || n > 65535) return 9000
   return n
 }
