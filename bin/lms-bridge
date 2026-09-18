@@ -1,0 +1,676 @@
+#!/usr/bin/env python3
+"""Lyrion Music Server (LMS/Squeezebox) protocol adapter for the Omarchy plugin.
+
+Speaks the plugin's NDJSON protocol on stdin/stdout (protocol version 1),
+mirroring bin/oh-bridge in openhab-omarchy:
+
+  -> {"op":"config","generation":N,"host":"...","port":9000,
+      "username":"","password":"","playerId":"","demoMode":false}
+  -> {"op":"disconnect"}
+  -> {"op":"refresh"}
+  -> {"op":"discover"}
+  -> {"op":"selectPlayer","player":"<id>"}
+  -> {"op":"cmd","player":"<id>","cli":["pause","1"],"tag":"..."}
+  -> {"op":"shutdown"}
+  <- {"ev":"phase","phase":"idle|connecting|connected|error","generation":N,
+      "error":"...","errorKind":"auth|network"}
+  <- {"ev":"players","items":[...],"generation":N}
+  <- {"ev":"state","player":"<id>","nowplaying":{...},"generation":N}
+  <- {"ev":"servers","items":[...],"generation":N}
+  <- {"ev":"coverbase","url":"http://127.0.0.1:PORT"}
+  <- {"ev":"result","tag":"...","success":true|false,"error":"...","generation":N}
+
+Credentials arrive over stdin (the `config` op) and are never placed in argv.
+The bridge owns the single CometD long-poll connection; QML owns nothing
+network-related. Cover art on password-protected servers is served through a
+localhost proxy so QML's Image element needs no auth header.
+
+`lms-bridge pick <query>` is a separate terminal entry point: it queries the
+server described by $LMS_HOST/$LMS_PORT (or defaults) and pipes results to fzf.
+"""
+
+import base64
+import json
+import os
+import re
+import socket
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PROTOCOL_VERSION = 1
+DEFAULT_PORT = 9000
+HTTP_TIMEOUT = 10.0
+COMETD_TIMEOUT = 70.0
+MAX_BODY_BYTES = 16 * 1024 * 1024
+NOWPLAYING_TAGS = "acdlKNt"
+KIND_AUTH = "auth"
+KIND_NETWORK = "network"
+
+
+def redact(text):
+    """Best-effort scrub of a password appearing in a log line."""
+    return re.sub(r"(?i)(password|passwd|secret)=\S+", r"\1=***", str(text or ""))
+
+
+def basic_auth(user, password):
+    if not password and not user:
+        return ""
+    raw = ("%s:%s" % (user or "", password or "")).encode("utf-8")
+    return "Basic " + base64.b64encode(raw).decode("ascii")
+
+
+class HttpError(Exception):
+    def __init__(self, code, reason, kind=KIND_NETWORK):
+        super().__init__("HTTP %s: %s" % (code, reason))
+        self.code = code
+        self.kind = kind
+
+
+class Http:
+    """Thin urllib wrapper carrying optional HTTP Basic credentials."""
+
+    def __init__(self, auth="", timeout=HTTP_TIMEOUT):
+        self.auth = auth
+        self.timeout = timeout
+
+    def request(self, url, method="GET", body=None, ctype=None, limit=MAX_BODY_BYTES):
+        headers = {"Accept": "application/json"}
+        if ctype:
+            headers["Content-Type"] = ctype
+        if self.auth:
+            headers["Authorization"] = self.auth
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as res:
+                return self._read_bounded(res, limit)
+        except urllib.error.HTTPError as e:
+            kind = KIND_AUTH if e.code in (401, 403) else KIND_NETWORK
+            raise HttpError(e.code, e.reason, kind) from e
+        except (urllib.error.URLError, socket.timeout, OSError) as e:
+            raise HttpError(0, str(e), KIND_NETWORK) from e
+
+    @staticmethod
+    def _read_bounded(res, limit):
+        chunks = []
+        total = 0
+        while True:
+            chunk = res.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise HttpError(0, "response too large", KIND_NETWORK)
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
+def jsonrpc(http, player, cli):
+    """POST a slim.request and return the `result` object (or {})."""
+    payload = {"id": 1, "method": "slim.request", "params": [player or "", list(cli)]}
+    body = json.dumps(payload).encode("utf-8")
+    raw = http.request(URL_JSONRPC, method="POST", body=body,
+                       ctype="application/json", limit=MAX_BODY_BYTES)
+    try:
+        data = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError as e:
+        raise HttpError(0, "non-JSON response (auth required?)", KIND_AUTH) from e
+    return data.get("result", {}) if isinstance(data, dict) else {}
+
+
+URL_JSONRPC = ""  # set by Bridge once host/port are known
+
+
+def _set_url(host, port):
+    global URL_JSONRPC
+    URL_JSONRPC = "http://%s:%d/jsonrpc.js" % (host, port)
+
+
+# ---------------------------------------------------------------------------
+# CometD (Bayeux) push client
+
+
+class CometD:
+    """One long-poll Bayeux client. Calls on_event(player_id) on any push to a
+    subscribed /player/<id> channel; the Bridge then re-queries that player."""
+
+    def __init__(self, base, auth, on_event, on_phase):
+        self.base = base.rstrip("/") + "/cometd"
+        self.http = Http(auth, timeout=COMETD_TIMEOUT)
+        self.on_event = on_event
+        self.on_phase = on_phase
+        self._stop = threading.Event()
+        self._client_id = ""
+        self._thread = None
+        self._subs = set()
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="cometd", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def subscribe(self, player_ids):
+        self._subs = {"/player/%s" % p for p in player_ids if p}
+
+    def _post(self, messages):
+        body = json.dumps(messages).encode("utf-8")
+        raw = self.http.request(self.base, method="POST", body=body,
+                                ctype="application/json", limit=MAX_BODY_BYTES)
+        return json.loads(raw.decode("utf-8", "replace"))
+
+    def _handshake(self):
+        msg = {"channel": "/meta/handshake", "id": "1", "version": "1.0",
+               "supportedConnectionTypes": ["long-polling"],
+               "advice": {"interval": 0, "timeout": 0}}
+        replies = self._post([msg])
+        first = replies[0] if replies else {}
+        if not first.get("successful"):
+            raise HttpError(0, "cometd handshake failed", KIND_NETWORK)
+        self._client_id = first.get("clientId", "")
+
+    def _run(self):
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                self._handshake()
+                if not self._subs:
+                    self.subscribe([])
+                subs = [{"channel": "/meta/subscribe", "id": "2",
+                         "clientId": self._client_id, "subscription": ch}
+                        for ch in sorted(self._subs)]
+                if subs:
+                    self._post(subs)
+                self.on_phase("connected")
+                backoff = 1.0
+                self._long_poll()
+            except HttpError as e:
+                if e.kind == KIND_AUTH:
+                    self.on_phase("error", str(e), KIND_AUTH)
+                    return
+                self.on_phase("error", str(e), KIND_NETWORK)
+            except Exception as e:  # noqa: BLE001 - reconnect on anything
+                self.on_phase("error", redact(e), KIND_NETWORK)
+            if self._stop.wait(backoff):
+                return
+            backoff = min(backoff * 2, 30.0)
+
+    def _long_poll(self):
+        while not self._stop.is_set() and self._client_id:
+            msg = {"channel": "/meta/connect", "id": "3",
+                   "clientId": self._client_id, "connectionType": "long-polling"}
+            replies = self._post([msg])
+            for reply in replies:
+                ch = reply.get("channel", "")
+                data = reply.get("data") or {}
+                if ch.startswith("/player/"):
+                    pid = ch.split("/player/", 1)[1]
+                    self.on_event(pid, data)
+                advice = reply.get("advice") or {}
+                if advice.get("reconnect") == "handshake":
+                    self._client_id = ""
+                    return
+
+
+# ---------------------------------------------------------------------------
+# localhost cover-art proxy
+
+
+class _CoverHandler(BaseHTTPRequestHandler):
+    proxy = None  # set by CoverProxy
+
+    def do_GET(self):  # noqa: N802
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path.startswith("/now/"):
+                pid = parsed.path[len("/now/"):].rsplit(".", 1)[0]
+                upstream = "%s/music/current/cover.jpg?player=%s" % (
+                    self.proxy.lms_base, urllib.parse.quote(pid))
+            elif parsed.path.startswith("/cover/"):
+                cid = parsed.path[len("/cover/"):].rsplit(".", 1)[0]
+                upstream = "%s/music/%s/cover.jpg" % (self.proxy.lms_base,
+                                                      urllib.parse.quote(cid))
+            else:
+                self.send_error(404)
+                return
+            raw = self.proxy.http.request(upstream, method="GET", limit=MAX_BODY_BYTES)
+            ctype = "image/jpeg"
+            if raw[:4] == b"\x89PNG":
+                ctype = "image/png"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "max-age=30")
+            self.end_headers()
+            self.wfile.write(raw)
+        except HttpError as e:
+            self.send_error(404 if e.code == 404 else 502)
+        except Exception:  # noqa: BLE001
+            self.send_error(502)
+
+    def log_message(self, *args):  # silence
+        pass
+
+
+class CoverProxy:
+    def __init__(self, lms_base, auth):
+        self.lms_base = lms_base.rstrip("/")
+        self.http = Http(auth, timeout=HTTP_TIMEOUT)
+        self._server = None
+        self._thread = None
+        self.port = 0
+
+    def start(self):
+        handler = type("_H", (_CoverHandler,), {"proxy": self})
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever,
+                                        name="cover-proxy", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._server:
+            self._server.shutdown()
+            self._server.server_close()
+
+
+# ---------------------------------------------------------------------------
+# demo transport (no server)
+
+
+class Demo:
+    PLAYERS = [
+        {"playerid": "demo:living", "name": "Living Room", "model": "squeezelite",
+         "isplaying": 1, "power": 1, "connected": 1, "isgroup": False},
+        {"playerid": "demo:kitchen", "name": "Kitchen", "model": "squeezelite",
+         "isplaying": 0, "power": 0, "connected": 1, "isgroup": False},
+    ]
+
+    def nowplaying(self, pid):
+        return {"mode": "play", "player": pid, "title": "Demo Track",
+                "artist": "Demo Artist", "album": "Demo Album", "time": 42,
+                "duration": 210, "volume": 40, "power": 1}
+
+
+# ---------------------------------------------------------------------------
+# Bridge
+
+
+class Bridge:
+    def __init__(self, demo_mode=False):
+        self._demo = demo_mode
+        self._generation = 0
+        self._phase = "idle"
+        self._config = {}
+        self._http = None
+        self._cometd = None
+        self._cover = None
+        self._conn_run = threading.Event()
+        self._players = []
+        self._active = ""
+        self._emit_lock = threading.Lock()
+        self._teardown_lock = threading.Lock()
+
+    # -- emitters -----------------------------------------------------------
+
+    def emit(self, obj):
+        out = sys.stdout
+        if out is None:  # interpreter tearing down a daemon thread
+            return
+        line = json.dumps(obj, separators=(",", ":"))
+        with self._emit_lock:
+            try:
+                out.write(line + "\n")
+                out.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+
+    def _result(self, tag, ok, error=""):
+        self.emit({"ev": "result", "tag": tag, "success": ok, "error": error,
+                   "generation": self._generation})
+
+    def _log(self, level, message):
+        self.emit({"ev": "log", "level": level, "message": redact(message)})
+
+    def _set_phase(self, phase, error="", kind=""):
+        if phase == self._phase and not error:
+            return
+        self._phase = phase
+        ev = {"ev": "phase", "phase": phase, "generation": self._generation}
+        if error:
+            ev["error"] = error
+        if kind:
+            ev["errorKind"] = kind
+        self.emit(ev)
+
+    # -- stdin dispatch -----------------------------------------------------
+
+    def handle_line(self, line):
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            self._log("error", "non-JSON input line")
+            return
+        op = msg.get("op")
+        handlers = {
+            "config": self._handle_config,
+            "disconnect": lambda m: self._teardown(),
+            "refresh": self._handle_refresh,
+            "discover": self._handle_discover,
+            "selectPlayer": self._handle_select,
+            "cmd": self._handle_cmd,
+        }
+        if op == "shutdown":
+            self.emit({"ev": "exited", "reason": "shutdown"})
+            self._teardown()
+            sys.exit(0)
+        fn = handlers.get(op)
+        if fn is None:
+            self._log("warn", "unknown op: %r" % op)
+        else:
+            fn(msg)
+
+    def _handle_config(self, msg):
+        self._teardown()
+        self._generation = int(msg.get("generation", self._generation + 1))
+        self._demo = bool(msg.get("demoMode", self._demo))
+        self._active = msg.get("playerId", "") or ""
+        self._config = {
+            "host": msg.get("host", ""),
+            "port": int(msg.get("port", DEFAULT_PORT) or DEFAULT_PORT),
+            "user": msg.get("username", ""),
+            "password": msg.get("password", ""),
+        }
+        self.emit({"ev": "config_ack", "generation": self._generation})
+        if self._demo:
+            self._connect()  # synchronous: nothing to wait on, keeps output ordered
+        else:
+            threading.Thread(target=self._connect, name="connect", daemon=True).start()
+
+    # -- connection ---------------------------------------------------------
+
+    def _connect(self):
+        self._set_phase("connecting")
+        if self._demo:
+            self._players = [dict(p) for p in Demo.PLAYERS]
+            self.emit({"ev": "players", "items": self._players,
+                       "generation": self._generation})
+            for p in self._players:
+                self._emit_state(p["playerid"], Demo().nowplaying(p["playerid"]))
+            self._set_phase("connected")
+            return
+        host = self._config.get("host", "")
+        if not host:
+            self._set_phase("error", "no server configured", KIND_NETWORK)
+            return
+        auth = basic_auth(self._config.get("user"), self._config.get("password"))
+        _set_url(host, self._config["port"])
+        self._http = Http(auth)
+        try:
+            self._servers_status(auth)
+        except HttpError as e:
+            self._set_phase("error", str(e), e.kind)
+            return
+        self._cover = CoverProxy("http://%s:%d" % (host, self._config["port"]), auth)
+        self._cover.start()
+        self.emit({"ev": "coverbase", "url": "http://127.0.0.1:%d" % self._cover.port})
+        self._refresh_players(emit=True)
+        for pid in self._player_ids():
+            try:
+                self._emit_state(pid, self._query_status(pid))
+            except HttpError:
+                pass
+        self._set_phase("connected")
+        self._start_cometd(auth)
+
+    def _servers_status(self, auth):
+        res = jsonrpc(self._http, "", ["serverstatus", "0", "100"])
+        if not res:
+            raise HttpError(0, "empty serverstatus (auth required?)", KIND_AUTH)
+        self._server_name = res.get("_name") or res.get("name") or ""
+        self._server_version = res.get("version", "")
+
+    def _start_cometd(self, auth):
+        base = "http://%s:%d" % (self._config["host"], self._config["port"])
+        self._cometd = CometD(base, auth, self._on_push, self._set_phase)
+        self._cometd.subscribe(self._player_ids())
+        self._cometd.start()
+
+    def _player_ids(self):
+        return [p.get("playerid", "") for p in self._players]
+
+    def _refresh_players(self, emit=False):
+        res = jsonrpc(self._http, "", ["players", "0", "100", "tags:cgls"])
+        loop = res.get("players_loop", []) if isinstance(res, dict) else []
+        players = []
+        for p in loop:
+            players.append({
+                "playerid": p.get("playerid", ""),
+                "name": p.get("name", "Unknown"),
+                "model": p.get("model", ""),
+                "isplaying": int(p.get("isplaying", 0) or 0),
+                "power": int(p.get("power", 0) or 0),
+                "connected": int(p.get("connected", 0) or 0),
+                "isgroup": bool(p.get("isgroup") == 1 or p.get("model") == "group"),
+            })
+        self._players = players
+        if emit:
+            self.emit({"ev": "players", "items": players,
+                       "generation": self._generation})
+        return players
+
+    def _handle_refresh(self):
+        if self._demo or not self._http:
+            return
+        try:
+            self._refresh_players(emit=True)
+            for pid in self._player_ids():
+                self._emit_state(pid, self._query_status(pid))
+            self._result("", True)
+        except HttpError as e:
+            self._result("", False, str(e))
+
+    def _handle_select(self, msg):
+        self._active = msg.get("player", "") or ""
+        self._result(msg.get("tag", ""), True)
+
+    def _handle_cmd(self, msg):
+        tag = msg.get("tag", "")
+        cli = msg.get("cli") or []
+        player = msg.get("player") or self._active
+        if self._demo:
+            self._result(tag, True)
+            return
+        if not self._http:
+            self._result(tag, False, "not connected")
+            return
+        try:
+            jsonrpc(self._http, player, cli)
+            # Reflect the change immediately rather than waiting for the push.
+            if player and cli and cli[0] in ("pause", "play", "power", "mixer",
+                                             "playlist", "time", "sync", "syncgroups"):
+                self._emit_state(player, self._query_status(player))
+            self._result(tag, True)
+        except HttpError as e:
+            self._result(tag, False, str(e))
+
+    def _query_status(self, pid):
+        res = jsonrpc(self._http, pid, ["status", "0", 1, "tags:" + NOWPLAYING_TAGS])
+        return _nowplaying(res, pid)
+
+    def _emit_state(self, pid, nowplaying):
+        self.emit({"ev": "state", "player": pid, "nowplaying": nowplaying,
+                   "generation": self._generation})
+
+    # -- push ---------------------------------------------------------------
+
+    def _on_push(self, pid, _data):
+        if not self._http:
+            return
+        try:
+            if pid not in self._player_ids():
+                self._refresh_players(emit=True)
+                if self._cometd:
+                    self._cometd.subscribe(self._player_ids())
+            self._emit_state(pid, self._query_status(pid))
+        except HttpError:
+            pass
+
+    # -- discovery ----------------------------------------------------------
+
+    def _handle_discover(self, _msg):
+        if self._demo:
+            self.emit({"ev": "servers", "items": [
+                {"host": "demo.local", "port": DEFAULT_PORT, "name": "Demo LMS"}],
+                "generation": self._generation})
+            return
+        servers = discover_lms()
+        self.emit({"ev": "servers", "items": servers,
+                   "generation": self._generation})
+        if not servers:
+            self._log("info", "discovery found no servers on the local subnet")
+
+    # -- teardown -----------------------------------------------------------
+
+    def _teardown(self):
+        with self._teardown_lock:
+            if self._cometd:
+                self._cometd.stop()
+                self._cometd = None
+            if self._cover:
+                self._cover.stop()
+                self._cover = None
+            self._http = None
+            self._phase = "idle"
+
+
+def _nowplaying(res, pid):
+    """Normalize an LMS `status` result into the plugin's now-playing shape."""
+    if not isinstance(res, dict):
+        return {}
+    loop = res.get("playlist_loop") or [{}]
+    track = loop[0] if loop else {}
+    coverid = res.get("coverid") or track.get("coverid") or track.get("id")
+    return {
+        "mode": res.get("mode", "stop"),
+        "power": int(res.get("power", 0) or 0),
+        "time": int(float(res.get("time", 0) or 0)),
+        "duration": int(track.get("duration", 0) or 0),
+        "title": track.get("title", ""),
+        "artist": track.get("artist", ""),
+        "album": track.get("album", ""),
+        "coverid": coverid,
+        "volume": int(res.get("mixer volume", 0) or 0),
+        "cur_index": res.get("playlist_cur_index", "0"),
+        "playerid": pid,
+    }
+
+
+def _local_subnet_prefix():
+    """Best-effort /24 prefix of the primary interface, else None."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip.rsplit(".", 1)[0]
+    except OSError:
+        return None
+
+
+def _probe(host, port, timeout=0.5):
+    url = "http://%s:%d/jsonrpc.js" % (host, port)
+    try:
+        raw = Http("", timeout=timeout).request(
+            url, method="POST", ctype="application/json",
+            body=json.dumps({"id": 1, "method": "slim.request",
+                             "params": ["", ["serverstatus", "0", "100"]]}).encode(),
+            limit=64 * 1024)
+        data = json.loads(raw.decode("utf-8", "replace"))
+        res = data.get("result", {}) if isinstance(data, dict) else {}
+        if not res:
+            return {"host": host, "port": port, "name": "", "authRequired": True}
+        return {"host": host, "port": port,
+                "name": res.get("_name", "") or host, "version": res.get("version", "")}
+    except HttpError as e:
+        if e.kind == KIND_AUTH:
+            return {"host": host, "port": port, "name": host, "authRequired": True}
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def discover_lms(port=DEFAULT_PORT, workers=48):
+    prefix = _local_subnet_prefix()
+    if not prefix:
+        return []
+    hosts = ["%s.%d" % (prefix, i) for i in range(1, 255)]
+    found = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_probe, h, port) for h in hosts]
+        for fut in as_completed(futures):
+            r = fut.result()
+            if r:
+                found.append(r)
+    found.sort(key=lambda s: s["host"])
+    return found
+
+
+# ---------------------------------------------------------------------------
+# terminal picker (fzf)
+
+def pick_main(argv):
+    """`lms-bridge pick <query>` — query LMS and pipe to fzf if present."""
+    host = os.environ.get("LMS_HOST", "localhost")
+    port = int(os.environ.get("LMS_PORT", DEFAULT_PORT))
+    query = " ".join(argv).strip()
+    auth = basic_auth(os.environ.get("LMS_USERNAME", ""), os.environ.get("LMS_PASSWORD", ""))
+    http = Http(auth)
+    _set_url(host, port)
+    res = jsonrpc(http, "", ["tracks", "0", "50", "search:%s" % query, "tags:at"])
+    rows = []
+    for t in res.get("titles_loop") or res.get("tracks_loop") or []:
+        label = "%s — %s" % (t.get("artist", "?"), t.get("title", "?"))
+        rows.append("%s\t%s" % (label, t.get("id", "")))
+    if not rows:
+        sys.stderr.write("no matches for %r\n" % query)
+        return 1
+    try:
+        import subprocess
+        p = subprocess.run(["fzf", "--with-nth=1", "--delimiter=\t"],
+                           input="\n".join(rows).encode(), stdout=subprocess.PIPE)
+        if p.returncode != 0 or not p.stdout.strip():
+            return 0
+        trackid = p.stdout.decode().strip().split("\t")[-1]
+        print("play track %s on the selected player (id %s)" % (trackid, trackid))
+    except FileNotFoundError:
+        for i, row in enumerate(rows, 1):
+            print("%d) %s" % (i, row.split("\t")[0]))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# entrypoint
+
+def main(argv):
+    if argv and argv[0] == "pick":
+        return pick_main(argv[1:])
+    demo = "--demo" in argv
+    bridge = Bridge(demo_mode=demo)
+    bridge.emit({"ev": "hello", "version": PROTOCOL_VERSION,
+                 "mode": "demo" if demo else "remote"})
+    for line in sys.stdin:
+        bridge.handle_line(line)
+    bridge._teardown()
+    bridge.emit({"ev": "exited", "reason": "eof"})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
