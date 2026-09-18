@@ -20,6 +20,21 @@ Panel {
   readonly property color dim: Qt.darker(fg, 1.4)
   readonly property color selectedFill: Style.selectedFillFor(fg, Color.accent)
 
+  // Nerd Font (MDI) glyphs — same literals the omarchy.media plugin uses.
+  // String.fromCharCode would truncate these past-BMP codepoints to their
+  // low 16 bits (hence the old "f"-looking gear), so keep them as literals.
+  readonly property string family: bar ? bar.fontFamily : Style.font.family
+  readonly property string glyphPlay: "󰐊"    // md-play
+  readonly property string glyphPause: "󰏤"   // md-pause
+  readonly property string glyphPrev: "󰒮"    // md-skip-previous
+  readonly property string glyphNext: "󰒭"    // md-skip-next
+  readonly property string glyphNote: "󰝚"    // md-music (cover placeholder)
+  readonly property string glyphMusic: "󰐉"   // md-music-note (idle state)
+  readonly property string glyphGear: "󰒓"    // md-cog
+  readonly property string glyphVolHi: "󰕾"   // md-volume-high
+  readonly property string glyphVolOff: "󰖁"  // md-volume-off
+  readonly property bool controlsActive: serviceReady && lms.connected
+
   function openSettings() {
     if (!bar || !bar.shell || typeof bar.shell.summon !== "function") return
     close()
@@ -78,8 +93,9 @@ Panel {
     iconComponent: Component {
       Text {
         anchors.centerIn: parent
-        text: root.lms && root.lms.playing ? "\u25B6" : "\u266B"
+        text: root.lms && root.lms.playing ? root.glyphPlay : root.glyphMusic
         color: root.barIconColor
+        font.family: root.family
         font.pixelSize: Style.bar.iconCanvas * 0.8
       }
     }
@@ -128,15 +144,17 @@ Panel {
               Text {
                 color: root.phase === "error"
                   ? (bar ? bar.urgent : Color.urgent) : root.fg
+                font.family: root.family
                 font.pixelSize: Style.font.display
-                text: root.lms && root.lms.playing ? "\u25B6" : "\u266B"
+                text: root.lms && root.lms.playing ? root.glyphPlay : root.glyphMusic
               }
             }
             trailingControl: Component {
               Row {
                 spacing: Style.spacing.xs
                 PanelActionButton {
-                  iconText: String.fromCharCode(0xF0493)  // md-cog
+                  iconText: root.glyphGear
+                  fontFamily: root.family
                   tooltipText: "Settings"
                   foreground: Qt.darker(root.fg, 1.4)
                   onClicked: root.openSettings()
@@ -181,7 +199,7 @@ Panel {
                 for (var i = 0; i < players.length; i++) {
                   var p = players[i]
                   out.push({ value: p.playerid,
-                    label: (p.isplaying ? "\u25B6 " : "") + p.name
+                    label: (p.isplaying ? root.glyphPlay + " " : "") + p.name
                       + (p.isgroup ? "  (group)" : "") })
                 }
                 return out
@@ -210,8 +228,9 @@ Panel {
               }
               Text {
                 anchors.centerIn: parent
-                text: "\u266A"
+                text: root.glyphNote
                 color: root.dim
+                font.family: root.family
                 font.pixelSize: Style.space(24)
                 visible: root.lms.coverUrl === ""
               }
@@ -251,27 +270,33 @@ Panel {
             spacing: Style.spacing.lg
             visible: root.serviceReady && root.lms.configured && root.lms.players.length > 0
             PanelActionButton {
-              iconText: "\u23EE"          // previous
+              iconText: root.glyphPrev            // previous
               size: Style.space(40)
               bordered: true
+              fontFamily: root.family
               foreground: root.fg
               color: "transparent"
+              enabled: root.controlsActive
               onClicked: root.lms.previous()
             }
             PanelActionButton {
-              iconText: root.lms.playing ? "\u23F8" : "\u25B6"   // pause / play
+              iconText: root.lms.playing ? root.glyphPause : root.glyphPlay
               size: Style.space(40)
               bordered: true
+              fontFamily: root.family
               foreground: root.fg
               color: "transparent"
+              enabled: root.controlsActive
               onClicked: root.lms.togglePlay()
             }
             PanelActionButton {
-              iconText: "\u23ED"          // next
+              iconText: root.glyphNext            // next
               size: Style.space(40)
               bordered: true
+              fontFamily: root.family
               foreground: root.fg
               color: "transparent"
+              enabled: root.controlsActive
               onClicked: root.lms.next()
             }
           }
@@ -282,10 +307,10 @@ Panel {
             spacing: Style.spacing.md
             visible: root.serviceReady && root.lms.configured
             Text {
-              // md-volume_high / md-volume_off (MDI via Nerd Font, same set as the openhab lightbulb)
               text: (root.lms.nowplaying.volume || 0) === 0
-                ? String.fromCharCode(0xF0581) : String.fromCharCode(0xF057E)
+                ? root.glyphVolOff : root.glyphVolHi
               color: root.fg
+              font.family: root.family
               font.pixelSize: Style.font.body
               verticalAlignment: Text.AlignVCenter
             }
