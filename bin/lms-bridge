@@ -53,6 +53,14 @@ KIND_AUTH = "auth"
 KIND_NETWORK = "network"
 
 
+def _coerce_int(value, default=0):
+    """Tolerant int coercion — handles None, "", floats, "1:02", "75 %", etc."""
+    try:
+        return int(float(str(value).strip().rstrip("%")))
+    except (TypeError, ValueError):
+        return default
+
+
 def redact(text):
     """Best-effort scrub of a password appearing in a log line."""
     return re.sub(r"(?i)(password|passwd|secret)=\S+", r"\1=***", str(text or ""))
@@ -374,7 +382,16 @@ class Bridge:
         if fn is None:
             self._log("warn", "unknown op: %r" % op)
         else:
-            fn(msg)
+            try:
+                fn(msg)
+            except Exception:  # noqa: BLE001 - never let a message kill the bridge
+                import traceback
+                tb = traceback.format_exc()
+                self._log("error", "op %r failed: %s" % (op, tb))
+                self.emit({"ev": "phase", "phase": "error",
+                           "error": "bridge error: %s" % tb.strip().splitlines()[-1],
+                           "errorKind": KIND_NETWORK,
+                           "generation": self._generation})
 
     def _handle_config(self, msg):
         self._teardown()
@@ -454,9 +471,9 @@ class Bridge:
                 "playerid": p.get("playerid", ""),
                 "name": p.get("name", "Unknown"),
                 "model": p.get("model", ""),
-                "isplaying": int(p.get("isplaying", 0) or 0),
-                "power": int(p.get("power", 0) or 0),
-                "connected": int(p.get("connected", 0) or 0),
+                "isplaying": _coerce_int(p.get("isplaying", 0)),
+                "power": _coerce_int(p.get("power", 0)),
+                "connected": _coerce_int(p.get("connected", 0)),
                 "isgroup": bool(p.get("isgroup") == 1 or p.get("model") == "group"),
             })
         self._players = players
@@ -559,14 +576,14 @@ def _nowplaying(res, pid):
     coverid = res.get("coverid") or track.get("coverid") or track.get("id")
     return {
         "mode": res.get("mode", "stop"),
-        "power": int(res.get("power", 0) or 0),
-        "time": int(float(res.get("time", 0) or 0)),
-        "duration": int(track.get("duration", 0) or 0),
+            "power": _coerce_int(res.get("power", 0)),
+            "time": _coerce_int(res.get("time", 0)),
+            "duration": _coerce_int(track.get("duration", 0)),
         "title": track.get("title", ""),
         "artist": track.get("artist", ""),
         "album": track.get("album", ""),
         "coverid": coverid,
-        "volume": int(res.get("mixer volume", 0) or 0),
+        "volume": _coerce_int(res.get("mixer volume", 0)),
         "cur_index": res.get("playlist_cur_index", "0"),
         "playerid": pid,
     }

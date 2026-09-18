@@ -231,6 +231,14 @@ QtObject {
     executable: root.pluginDir + "/bin/lms-bridge"
     onReady: if (root.configured) root.pushConfig()
     onLine: function(value) { root.handleEvent(value) }
+    onStderrLine: function(line) {
+      // Surface bridge tracebacks into lastError while not connected —
+      // quiet in happy path (bridge writes nothing to stderr normally).
+      if (!root.connected) {
+        root.lastError = line.trim()
+        root.lastErrorKind = "network"
+      }
+    }
     onFailed: function(message) {
       root.phase = "error"
       root.lastError = message

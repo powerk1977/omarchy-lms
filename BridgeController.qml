@@ -14,6 +14,7 @@ QtObject {
   property var restartCommand: null
 
   signal line(string value)
+  signal stderrLine(string value)
   signal ready()
   signal failed(string message)
 
@@ -46,6 +47,10 @@ QtObject {
 
     stdout: SplitParser {
       onRead: function(value) { root.line(value) }
+    }
+
+    stderr: SplitParser {
+      onRead: function(value) { root.stderrLine(value) }
     }
 
     onStarted: {

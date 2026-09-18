@@ -177,10 +177,56 @@ def test_discovery_demo():
     print("ok discovery (demo)")
 
 
+def test_nowplaying_hardening():
+    import importlib.machinery
+    import importlib.util
+    spec = importlib.util.spec_from_loader(
+        "lms_bridge", importlib.machinery.SourceFileLoader("lms_bridge", str(BRIDGE)))
+    lb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lb)
+
+    assert lb._coerce_int(None) == 0
+    assert lb._coerce_int("") == 0
+    assert lb._coerce_int("1:02") == 0
+    assert lb._coerce_int("75 %") == 75
+    assert lb._coerce_int("42") == 42
+    assert lb._coerce_int(0) == 0
+
+    hostile = {"mode": "play", "power": "", "time": "1:02", "mixer volume": "50 %",
+               "playlist_loop": [{"duration": None, "title": "X"}]}
+    np = lb._nowplaying(hostile, "pid")
+    assert np == {"mode": "play", "power": 0, "time": 0, "duration": 0,
+                  "title": "X", "artist": "", "album": "", "coverid": None,
+                  "volume": 50, "cur_index": "0", "playerid": "pid"}, np
+    print("ok nowplaying hardening")
+
+
+def test_bridge_survives_bad_messages():
+    bp = BridgeProc(demo=True)
+    try:
+        bp.wait_for(lambda e: e.get("ev") == "hello")
+        # A message that used to crash the process (ValueError on bad port).
+        bp.send({"op": "config", "generation": 1, "demoMode": True, "port": "abc"})
+        err = bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "error")
+        assert "bridge error" in err.get("error", ""), err
+        assert bp.proc.poll() is None, "bridge died on a bad message"
+        # Unknown ops are tolerated, and a good config reconnects.
+        bp.send({"op": "frobnicate"})
+        bp.send({"op": "config", "generation": 2, "demoMode": True,
+                 "playerId": "demo:living"})
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+        assert bp.proc.poll() is None
+    finally:
+        bp.close()
+    print("ok bridge survives bad messages")
+
+
 if __name__ == "__main__":
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     test_demo_sequence()
     test_live_connect_command_and_cover()
     test_auth_required_and_recovery()
     test_discovery_demo()
+    test_nowplaying_hardening()
+    test_bridge_survives_bad_messages()
     print("\nall bridge tests passed")

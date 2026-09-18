@@ -238,17 +238,26 @@ Item {
               Button {
                 bordered: true
                 text: "Connect"
+                color: "transparent"
+                foreground: root.foreground
+                accent: root.foreground
                 onClicked: root.applyConnection()
               }
               Button {
                 bordered: true
                 text: "Discover"
+                color: "transparent"
+                foreground: root.foreground
+                accent: root.foreground
                 onClicked: function() { if (root.service) root.service.discover() }
               }
               Button {
                 bordered: true
                 text: "Forget password"
                 enabled: root.canForget
+                color: "transparent"
+                foreground: root.foreground
+                accent: root.foreground
                 onClicked: root.forgetCredential()
               }
             }
