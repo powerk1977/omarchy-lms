@@ -211,12 +211,29 @@ unsecured localhost setup):
 
 ## Open items to pin during Phase 1
 
-1. CometD push payload shapes + server-wide channel names.
+1. CometD push payload shapes + server-wide channel names — the bridge
+   re-queries the pushed player, so this is a record-only item, not a block.
 2. `playerpref` sync-delay token name, range, and sign.
 3. Subnet-sweep cost on real LANS (timeout/heuristics).
-4. Whether Material's `/slim/player` vs `/player` matters for anything.
-5. Auth behavior on a password-enabled server: failure signal, `/cometd`
-   Basic-auth acceptance, cover-art auth, proxy scope.
+4. Whether Material's `/slim/player` vs `/player` matters for anything
+   (both verified accepted; `/player` is the recommended spelling).
+5. Auth behavior on a password-enabled server: failure signal (bridge treats
+   a non-JSON `serverstatus` body as auth), `/cometd` Basic-auth acceptance,
+   cover-art auth, proxy scope.
+
+## Build status (Phase 1)
+
+- `bin/lms-bridge` implemented, live-verified against `localhost:9000`
+  (players list, now-playing re-query, cover proxy, command round-trip, CometD
+  subscribe with reconnect/backoff, Basic-auth failure → `errorKind: auth`).
+  Covered by `tests/fake_lms.py` + `tests/test_bridge.py` (no network/creds).
+- QML trio + `CredentialManager.qml` + `manifest.json` written. `omarchy plugin
+  validate .` passes; qmllint clean at reference parity; the plugin is
+  discoverable via the shell catalog.
+- Not yet built: sync-group UI (join/unsync + delay slider — the underlying
+  `sync`/`syncgroups`/`playerpref` commands already work through the generic
+  `cmd` op), search/browse panel, `pick` wired into the bar, marketplace
+  packaging.
 
 ## Holds / directives from the author
 

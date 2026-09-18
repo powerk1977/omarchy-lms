@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.powerk1977.lms",
+  "name": "Lyrion Music",
+  "version": "0.1.0",
+  "author": "powerk1977",
+  "license": "MIT",
+  "description": "Control Lyrion Music Server (Squeezebox) players from the Omarchy bar — now playing, transport, volume, and player selection.",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "overlay"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml",
+    "overlay": "Settings.qml"
+  },
+  "barWidget": {
+    "displayName": "Lyrion Music",
+    "description": "Now playing, transport, volume, and player selection for Lyrion Music Server.",
+    "category": "Media",
+    "aliases": [
+      "lms",
+      "squeezebox",
+      "lyrion"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
