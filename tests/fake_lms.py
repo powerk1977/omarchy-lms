@@ -30,6 +30,7 @@ class FakeLMS:
         self.commands = []  # every (player, cli) the bridge sent
         self.connect_calls = 0
         self.push_player = PLAYERS[0]["playerid"]
+        self.cover_paths = []  # every cover-art request path the bridge proxied
         self._server = None
         self._thread = None
         self.port = 0
@@ -117,6 +118,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(401, b"denied", ctype="text/plain")
             return
         if "cover" in self.path:
+            self.fake.cover_paths.append(self.path)
             self._send(200, COVER_JPEG, ctype="image/jpeg")
         else:
             self._send(404, b"{}")

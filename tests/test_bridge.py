@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -121,6 +122,17 @@ def test_live_connect_command_and_cover():
         with urllib.request.urlopen(base_ev["url"] + "/now/" + PID1 + ".jpg",
                                     timeout=5) as res:
             assert res.read() == COVER_JPEG
+
+        # Percent-encoded request paths (as the panel's encodeURIComponent
+        # emits) must not be double-encoded when proxied upstream — the player
+        # id the fake LMS sees must round-trip to the real id.
+        with urllib.request.urlopen(
+                base_ev["url"] + "/now/" + urllib.parse.quote(PID1, safe="") + ".jpg",
+                timeout=5) as res:
+            assert res.read() == COVER_JPEG
+        assert fake.cover_paths, fake.cover_paths
+        assert any(urllib.parse.unquote(p) == "/music/current/cover.jpg"
+                   + "?player=" + PID1 for p in fake.cover_paths), fake.cover_paths
 
         # A command round-trips and is reflected back to the client.
         bp.send({"op": "cmd", "player": PID1, "cli": ["pause", "1"], "tag": "t1"})

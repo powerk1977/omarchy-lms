@@ -237,11 +237,13 @@ class _CoverHandler(BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path.startswith("/now/"):
-                pid = parsed.path[len("/now/"):].rsplit(".", 1)[0]
+                pid = urllib.parse.unquote(
+                    parsed.path[len("/now/"):].rsplit(".", 1)[0])
                 upstream = "%s/music/current/cover.jpg?player=%s" % (
                     self.proxy.lms_base, urllib.parse.quote(pid))
             elif parsed.path.startswith("/cover/"):
-                cid = parsed.path[len("/cover/"):].rsplit(".", 1)[0]
+                cid = urllib.parse.unquote(
+                    parsed.path[len("/cover/"):].rsplit(".", 1)[0])
                 upstream = "%s/music/%s/cover.jpg" % (self.proxy.lms_base,
                                                       urllib.parse.quote(cid))
             else:
