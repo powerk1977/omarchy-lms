@@ -118,6 +118,15 @@ def test_live_connect_command_and_cover():
         assert state["nowplaying"]["artist"] == "Test Artist", state
         assert state["nowplaying"]["mode"] == "play", state
 
+        # The fake LMS pushes a status payload on the /slim/subscribe response
+        # channel during the first long-poll; the bridge must parse it directly
+        # into a state event (this is what updates the panel on track change).
+        push = bp.wait_for(lambda e: e.get("ev") == "state"
+                           and e["nowplaying"].get("title") == "Push Song")
+        assert push["nowplaying"]["artist"] == "Push Artist", push
+        assert push["nowplaying"]["mode"] == "pause", push
+        assert push["nowplaying"]["coverid"] == "cover99", push
+
         # Cover proxy forwards the artwork from the LMS.
         with urllib.request.urlopen(base_ev["url"] + "/now/" + PID1 + ".jpg",
                                     timeout=5) as res:

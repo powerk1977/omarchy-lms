@@ -29,8 +29,8 @@ class FakeLMS:
         self.cur_index = 2
         self.commands = []  # every (player, cli) the bridge sent
         self.connect_calls = 0
-        self.push_player = PLAYERS[0]["playerid"]
         self.cover_paths = []  # every cover-art request path the bridge proxied
+        self.push_channel = ""  # /slim/subscribe response channel the bridge chose
         self._server = None
         self._thread = None
         self.port = 0
@@ -148,16 +148,26 @@ class _Handler(BaseHTTPRequestHandler):
                 replies.append({"channel": channel, "id": mid, "successful": True,
                                 "clientId": "fakeclient",
                                 "advice": {"reconnect": "retry", "timeout": 60000}})
-            elif channel == "/meta/subscribe":
-                replies.append({"channel": channel, "id": mid, "successful": True,
-                                "subscription": m.get("subscription", "")})
+            elif channel == "/slim/subscribe":
+                # LMS-style status subscription: record the response channel the
+                # bridge chose so pushes can be delivered on it.
+                self.fake.push_channel = (m.get("data") or {}).get("response", "")
+                replies.append({"channel": channel, "id": mid, "successful": True})
             elif channel == "/meta/connect":
                 self.fake.connect_calls += 1
                 if self.fake.connect_calls == 1:
-                    # Deliver one player push so the bridge exercises _on_push.
+                    # Deliver one player-status push so the bridge exercises
+                    # _on_push with a real status-shaped payload.
                     replies.append({
-                        "channel": "/player/" + self.fake.push_player,
-                        "id": mid, "data": {"mode": "pause"},
+                        "channel": self.fake.push_channel,
+                        "id": mid,
+                        "data": {"mode": "pause", "power": 1, "time": 5,
+                                 "mixer volume": 40, "playlist_cur_index": "0",
+                                 "playlist_loop": [{"id": 99, "title": "Push Song",
+                                                    "artist": "Push Artist",
+                                                    "album": "Push Album",
+                                                    "duration": 200,
+                                                    "coverid": "cover99"}]},
                         "advice": {"reconnect": "retry"}})
                 else:
                     time.sleep(0.05)

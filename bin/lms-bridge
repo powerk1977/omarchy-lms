@@ -144,8 +144,13 @@ def _set_url(host, port):
 
 
 class CometD:
-    """One long-poll Bayeux client. Calls on_event(player_id) on any push to a
-    subscribed /player/<id> channel; the Bridge then re-queries that player."""
+    """One long-poll Bayeux client for LMS's non-standard CometD surface.
+
+    LMS ignores the standard /meta/subscribe channel; status subscriptions are
+    made via a /slim/subscribe message that carries the CLI query itself
+    (with a subscribe:N parameter), and the pushed status JSON is published on
+    the client-scoped response channel given in that message. Calls
+    on_event(player_id, status_data) for each pushed status."""
 
     def __init__(self, base, auth, on_event, on_phase):
         self.base = base.rstrip("/") + "/cometd"
@@ -155,7 +160,7 @@ class CometD:
         self._stop = threading.Event()
         self._client_id = ""
         self._thread = None
-        self._subs = set()
+        self._pids = set()
 
     def start(self):
         self._thread = threading.Thread(target=self._run, name="cometd", daemon=True)
@@ -165,7 +170,7 @@ class CometD:
         self._stop.set()
 
     def subscribe(self, player_ids):
-        self._subs = {"/player/%s" % p for p in player_ids if p}
+        self._pids = {p for p in player_ids if p}
 
     def _post(self, messages):
         body = json.dumps(messages).encode("utf-8")
@@ -188,11 +193,16 @@ class CometD:
         while not self._stop.is_set():
             try:
                 self._handshake()
-                if not self._subs:
-                    self.subscribe([])
-                subs = [{"channel": "/meta/subscribe", "id": "2",
-                         "clientId": self._client_id, "subscription": ch}
-                        for ch in sorted(self._subs)]
+                subs = [{"channel": "/slim/subscribe", "id": "2",
+                         "clientId": self._client_id,
+                         "data": {
+                             "response": "/%s/slim/playerstatus/%s"
+                                         % (self._client_id, pid),
+                             "request": [pid, ["status", "-", 1,
+                                               "tags:" + NOWPLAYING_TAGS,
+                                               "subscribe:60"]],
+                         }}
+                        for pid in sorted(self._pids)]
                 if subs:
                     self._post(subs)
                 self.on_phase("connected")
@@ -217,8 +227,8 @@ class CometD:
             for reply in replies:
                 ch = reply.get("channel", "")
                 data = reply.get("data") or {}
-                if ch.startswith("/player/"):
-                    pid = ch.split("/player/", 1)[1]
+                if "/slim/playerstatus/" in ch:
+                    pid = ch.rsplit("/slim/playerstatus/", 1)[1]
                     self.on_event(pid, data)
                 advice = reply.get("advice") or {}
                 if advice.get("reconnect") == "handshake":
@@ -532,7 +542,7 @@ class Bridge:
 
     # -- push ---------------------------------------------------------------
 
-    def _on_push(self, pid, _data):
+    def _on_push(self, pid, data):
         if not self._http:
             return
         try:
@@ -540,7 +550,10 @@ class Bridge:
                 self._refresh_players(emit=True)
                 if self._cometd:
                     self._cometd.subscribe(self._player_ids())
-            self._emit_state(pid, self._query_status(pid))
+            if isinstance(data, dict) and "playlist_loop" in data:
+                self._emit_state(pid, _nowplaying(data, pid))
+            else:
+                self._emit_state(pid, self._query_status(pid))
         except HttpError:
             pass
 
