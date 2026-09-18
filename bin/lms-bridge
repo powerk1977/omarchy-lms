@@ -422,6 +422,13 @@ class Bridge:
                 self._emit_state(p["playerid"], Demo().nowplaying(p["playerid"]))
             self._set_phase("connected")
             return
+        try:
+            self._connect_live()
+        except Exception as e:  # noqa: BLE001 - daemon thread must not die silently
+            kind = e.kind if isinstance(e, HttpError) else KIND_NETWORK
+            self._set_phase("error", str(e), kind)
+
+    def _connect_live(self):
         host = self._config.get("host", "")
         if not host:
             self._set_phase("error", "no server configured", KIND_NETWORK)
@@ -429,11 +436,7 @@ class Bridge:
         auth = basic_auth(self._config.get("user"), self._config.get("password"))
         _set_url(host, self._config["port"])
         self._http = Http(auth)
-        try:
-            self._servers_status(auth)
-        except HttpError as e:
-            self._set_phase("error", str(e), e.kind)
-            return
+        self._servers_status(auth)
         self._cover = CoverProxy("http://%s:%d" % (host, self._config["port"]), auth)
         self._cover.start()
         self.emit({"ev": "coverbase", "url": "http://127.0.0.1:%d" % self._cover.port})
@@ -482,7 +485,7 @@ class Bridge:
                        "generation": self._generation})
         return players
 
-    def _handle_refresh(self):
+    def _handle_refresh(self, _msg):
         if self._demo or not self._http:
             return
         try:

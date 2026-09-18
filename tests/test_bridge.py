@@ -201,6 +201,27 @@ def test_nowplaying_hardening():
     print("ok nowplaying hardening")
 
 
+def test_refresh_op_signature():
+    bp = BridgeProc(demo=True)
+    try:
+        bp.send({"op": "config", "generation": 1, "demoMode": True,
+                 "playerId": "demo:living"})
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+        # Regression: every op is dispatched as fn(msg); a handler that takes no
+        # message arg used to TypeError into a phase:error on every refresh.
+        bp.send({"op": "refresh"})
+        bp.send({"op": "config", "generation": 2, "demoMode": True,
+                 "playerId": "demo:office"})
+        bp.wait_for(lambda e: e.get("ev") == "config_ack" and e.get("generation") == 2)
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+        errors = [e for e in bp.by_ev("phase") if e.get("phase") == "error"]
+        assert not errors, errors
+        assert bp.proc.poll() is None
+    finally:
+        bp.close()
+    print("ok refresh op dispatches cleanly")
+
+
 def test_bridge_survives_bad_messages():
     bp = BridgeProc(demo=True)
     try:
@@ -229,4 +250,5 @@ if __name__ == "__main__":
     test_discovery_demo()
     test_nowplaying_hardening()
     test_bridge_survives_bad_messages()
+    test_refresh_op_signature()
     print("\nall bridge tests passed")

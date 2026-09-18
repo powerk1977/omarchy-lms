@@ -118,6 +118,33 @@ Panel {
           width: parent.width
           spacing: Style.spacing.md
 
+          PanelHero {
+            width: parent.width
+            title: "Lyrion"
+            meta: root.phase
+            foreground: root.fg
+            iconOpacity: root.phase === "connected" ? 1.0 : 0.55
+            iconComponent: Component {
+              Text {
+                color: root.phase === "error"
+                  ? (bar ? bar.urgent : Color.urgent) : root.fg
+                font.pixelSize: Style.font.display
+                text: root.lms && root.lms.playing ? "\u25B6" : "\u266B"
+              }
+            }
+            trailingControl: Component {
+              Row {
+                spacing: Style.spacing.xs
+                PanelActionButton {
+                  iconText: String.fromCharCode(0xF0493)  // md-cog
+                  tooltipText: "Settings"
+                  foreground: Qt.darker(root.fg, 1.4)
+                  onClicked: root.openSettings()
+                }
+              }
+            }
+          }
+
           // ---- not configured / error ----
           Text {
             width: parent.width
@@ -271,28 +298,6 @@ Panel {
               maximum: 100
               integer: true
               onMoved: function(v) { root.lms.setVolume(v) }
-            }
-          }
-
-          // ---- actions ----
-          Row {
-            width: parent.width
-            spacing: Style.spacing.md
-            Button {
-              bordered: true
-              text: "Refresh"
-              foreground: root.fg
-              color: "transparent"
-              accent: root.fg
-              onClicked: root.lms.refresh()
-            }
-            Button {
-              bordered: true
-              text: "Settings"
-              foreground: root.fg
-              color: "transparent"
-              accent: root.fg
-              onClicked: root.openSettings()
             }
           }
         }
