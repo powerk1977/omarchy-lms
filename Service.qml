@@ -85,7 +85,11 @@ QtObject {
   readonly property string artist: root.nowplaying.artist || ""
   readonly property string coverUrl: {
     if (!root.coverBase || !root.activePlayerId) return ""
-    return root.coverBase + "/now/" + encodeURIComponent(root.activePlayerId) + ".jpg"
+    // Cache-bust per track: QML keys its image cache on the URL, so a
+    // stable URL would keep showing the previous album's art forever.
+    var v = root.nowplaying.coverid ? String(root.nowplaying.coverid) : ""
+    return root.coverBase + "/now/" + encodeURIComponent(root.activePlayerId)
+      + ".jpg" + (v ? "?v=" + v : "")
   }
 
   // ------------------------------------------------------------ config file
@@ -224,6 +228,7 @@ QtObject {
   function next() { root.sendCmd(["playlist", "index", "+1"], "transport") }
   function previous() { root.sendCmd(["playlist", "index", "-1"], "transport") }
   function setVolume(percent) { root.sendCmd(["mixer", "volume", Math.round(percent)], "volume") }
+  function seek(sec) { root.sendCmd(["time", Math.round(sec)], "transport") }
 
   // ------------------------------------------------------------ bridge
 

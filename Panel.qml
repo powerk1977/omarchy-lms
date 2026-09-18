@@ -35,6 +35,27 @@ Panel {
   readonly property string glyphVolOff: "󰖁"  // md-volume-off
   readonly property bool controlsActive: serviceReady && lms.connected
 
+  // Elapsed playhead, seconds. Re-synced from every pushed state (server is
+  // authoritative); ticks locally between pushes.
+  readonly property int revision: serviceReady ? lms.stateRevision : 0
+  property real elapsed: 0
+  onRevisionChanged: elapsed = serviceReady ? (lms.nowplaying.time || 0) : 0
+
+  function mmss(sec) {
+    sec = Math.max(0, Math.round(sec || 0))
+    var s = sec % 60
+    return Math.floor(sec / 60) + ":" + (s < 10 ? "0" : "") + s
+  }
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.serviceReady && root.lms.playing
+      && (root.lms.nowplaying.duration || 0) > 0
+    onTriggered: root.elapsed = Math.min(root.lms.nowplaying.duration || 0,
+                                         root.elapsed + 1)
+  }
+
   function openSettings() {
     if (!bar || !bar.shell || typeof bar.shell.summon !== "function") return
     close()
@@ -208,59 +229,118 @@ Panel {
             }
           }
 
-          // ---- now playing ----
+          // ---- volume ----
           Row {
             width: parent.width
             spacing: Style.spacing.md
             visible: root.serviceReady && root.lms.configured
-            Rectangle {
-              width: Style.space(64)
-              height: Style.space(64)
-              radius: Style.cornerRadius
-              color: Style.hoverFillFor(root.fg, Color.accent)
-              clip: true
-              Image {
-                anchors.fill: parent
-                source: root.lms.coverUrl
-                fillMode: Image.PreserveAspectCrop
-                asynchronous: true
-                visible: root.lms.coverUrl !== ""
-              }
-              Text {
-                anchors.centerIn: parent
-                text: root.glyphNote
-                color: root.dim
-                font.family: root.family
-                font.pixelSize: Style.space(24)
-                visible: root.lms.coverUrl === ""
+            Text {
+              text: (root.lms.nowplaying.volume || 0) === 0
+                ? root.glyphVolOff : root.glyphVolHi
+              color: root.fg
+              font.family: root.family
+              font.pixelSize: Style.font.body
+              verticalAlignment: Text.AlignVCenter
+            }
+            PanelSlider {
+              id: volume
+              width: parent.width - Style.space(28)
+              bar: root.bar
+              value: root.lms.nowplaying.volume || 0
+              minimum: 0
+              maximum: 100
+              integer: true
+              onMoved: function(v) { root.lms.setVolume(v) }
+            }
+          }
+
+          // ---- album art ----
+          Rectangle {
+            width: parent.width
+            height: width
+            radius: Style.cornerRadius
+            color: Style.hoverFillFor(root.fg, Color.accent)
+            clip: true
+            visible: root.serviceReady && root.lms.configured
+            Image {
+              anchors.fill: parent
+              source: root.lms.coverUrl
+              fillMode: Image.PreserveAspectCrop
+              asynchronous: true
+              visible: root.lms.coverUrl !== ""
+            }
+            Text {
+              anchors.centerIn: parent
+              text: root.glyphNote
+              color: root.dim
+              font.family: root.family
+              font.pixelSize: Style.space(40)
+              visible: root.lms.coverUrl === ""
+            }
+          }
+
+          // ---- progress ----
+          Row {
+            width: parent.width
+            spacing: Style.spacing.sm
+            visible: root.serviceReady && root.lms.configured
+              && (root.lms.nowplaying.duration || 0) > 0
+            Text {
+              text: root.mmss(progress.dragging ? progress.liveValue : root.elapsed)
+              color: root.dim
+              font.family: root.family
+              font.pixelSize: Style.font.caption
+              verticalAlignment: Text.AlignVCenter
+            }
+            PanelSlider {
+              id: progress
+              width: parent.width - Style.space(84)
+              bar: root.bar
+              value: root.elapsed
+              minimum: 0
+              maximum: Math.max(1, root.lms.nowplaying.duration || 1)
+              integer: true
+              onReleased: function(v) {
+                root.elapsed = v
+                root.lms.seek(v)
               }
             }
-            Column {
-              width: parent.width - Style.space(74)
-              spacing: Style.spacing.xs
-              Text {
-                width: parent.width
-                text: root.lms.title || "—"
-                color: root.fg
-                elide: Text.ElideRight
-                font.bold: true
-                font.pixelSize: Style.font.body
-              }
-              Text {
-                width: parent.width
-                text: root.lms.artist || ""
-                color: root.dim
-                elide: Text.ElideRight
-                font.pixelSize: Style.font.body
-              }
-              Text {
-                width: parent.width
-                text: root.lms.nowplaying.album || ""
-                color: root.dim
-                opacity: 0.7
-                elide: Text.ElideRight
-                font.pixelSize: Style.font.caption
-              }
+            Text {
+              text: root.mmss(root.lms.nowplaying.duration || 0)
+              color: root.dim
+              font.family: root.family
+              font.pixelSize: Style.font.caption
+              verticalAlignment: Text.AlignVCenter
+            }
+          }
+
+          // ---- song info ----
+          Column {
+            width: parent.width
+            spacing: Style.spacing.xs
+            visible: root.serviceReady && root.lms.configured
+            Text {
+              width: parent.width
+              text: root.lms.title || "—"
+              color: root.fg
+              elide: Text.ElideRight
+              font.bold: true
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              width: parent.width
+              text: root.lms.artist || ""
+              color: root.dim
+              elide: Text.ElideRight
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              width: parent.width
+              text: root.lms.nowplaying.album || ""
+              color: root.dim
+              opacity: 0.7
+              elide: Text.ElideRight
+              font.pixelSize: Style.font.caption
             }
           }
 
@@ -298,31 +378,6 @@ Panel {
               color: "transparent"
               enabled: root.controlsActive
               onClicked: root.lms.next()
-            }
-          }
-
-          // ---- volume ----
-          Row {
-            width: parent.width
-            spacing: Style.spacing.md
-            visible: root.serviceReady && root.lms.configured
-            Text {
-              text: (root.lms.nowplaying.volume || 0) === 0
-                ? root.glyphVolOff : root.glyphVolHi
-              color: root.fg
-              font.family: root.family
-              font.pixelSize: Style.font.body
-              verticalAlignment: Text.AlignVCenter
-            }
-            PanelSlider {
-              id: volume
-              width: parent.width - Style.space(28)
-              bar: root.bar
-              value: root.lms.nowplaying.volume || 0
-              minimum: 0
-              maximum: 100
-              integer: true
-              onMoved: function(v) { root.lms.setVolume(v) }
             }
           }
         }
