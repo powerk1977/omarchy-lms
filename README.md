@@ -1,12 +1,14 @@
 # Omarchy LMS Plugin
 
+Private repository: <https://github.com/powerk1977/omarchy-lms> (flipped public only at marketplace packaging / release candidate).
+
 A first-party Omarchy plugin for Lyrion Music Server (LMS / Squeezebox):
 discover servers on the local network, control any player connected to a
 server, browse and select music, and manage sync groups including per-player
 audio delay.
 
 This repository is the design/planning home for the plugin. The approved
-design lives in `docs/Tier3_Design_Plan_v4.docx`; all protocol research,
+design lives in `docs/Tier3_Design_Plan_v4.1.docx`; all protocol research,
 live-environment facts, and decisions are captured in `docs/RESEARCH.md`
 so any agent (or human) can pick the project up without redoing discovery.
 
