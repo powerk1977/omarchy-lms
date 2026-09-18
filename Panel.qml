@@ -143,16 +143,22 @@ Panel {
               text: "Players"
               color: root.fg
             }
-            Repeater {
-              model: root.serviceReady ? root.lms.players : []
-              delegate: Button {
-                required property var modelData
-                width: parent.width
-                text: modelData.name + (modelData.isgroup ? "  (group)" : "")
-                iconText: modelData.isplaying ? "\u25B6" : "\u25A0"
-                selected: modelData.playerid === root.lms.activePlayerId
-                onClicked: root.lms.selectPlayer(modelData.playerid)
+            Dropdown {
+              width: parent.width
+              foreground: root.fg
+              value: root.lms.activePlayerId
+              options: {
+                var out = []
+                var players = root.lms.players
+                for (var i = 0; i < players.length; i++) {
+                  var p = players[i]
+                  out.push({ value: p.playerid,
+                    label: (p.isplaying ? "\u25B6 " : "") + p.name
+                      + (p.isgroup ? "  (group)" : "") })
+                }
+                return out
               }
+              onChanged: function(v) { root.lms.selectPlayer(v) }
             }
           }
 
@@ -218,7 +224,7 @@ Panel {
             visible: root.serviceReady && root.lms.configured && root.lms.players.length > 0
             PanelActionButton {
               iconText: "\u23EE"          // previous
-              size: Style.space(34)
+              size: Style.space(40)
               bordered: true
               onClicked: root.lms.previous()
             }
@@ -226,12 +232,11 @@ Panel {
               iconText: root.lms.playing ? "\u23F8" : "\u25B6"   // pause / play
               size: Style.space(40)
               bordered: true
-              foreground: Color.accent
               onClicked: root.lms.togglePlay()
             }
             PanelActionButton {
               iconText: "\u23ED"          // next
-              size: Style.space(34)
+              size: Style.space(40)
               bordered: true
               onClicked: root.lms.next()
             }
@@ -243,7 +248,8 @@ Panel {
             spacing: Style.spacing.md
             visible: root.serviceReady && root.lms.configured
             Text {
-              text: "\U0001F50A"
+              // md-volume_high / md-volume_off (MDI via Nerd Font, same set as the openhab lightbulb)
+              text: (root.lms.nowplaying.volume || 0) === 0 ? "\U000F0581" : "\U000F057E"
               color: root.fg
               font.pixelSize: Style.font.body
               verticalAlignment: Text.AlignVCenter
@@ -267,11 +273,13 @@ Panel {
             Button {
               bordered: true
               text: "Refresh"
+              foreground: root.fg
               onClicked: root.lms.refresh()
             }
             Button {
               bordered: true
               text: "Settings"
+              foreground: root.fg
               onClicked: root.openSettings()
             }
           }

@@ -22,7 +22,7 @@ Item {
   property string tab: "connection"
 
   property string hostDraft: ""
-  property int portDraft: 9000
+  property string portText: "9000"
   property string userDraft: ""
   property string passwordDraft: ""
   property bool demoDraft: false
@@ -57,7 +57,7 @@ Item {
   function resetDrafts() {
     if (!root.service) return
     root.hostDraft = root.service.host
-    root.portDraft = root.service.port
+    root.portText = String(root.service.port)
     root.demoDraft = root.service.demoMode
     // Stored credentials never come back to screen; blank means "keep".
     root.userDraft = ""
@@ -66,7 +66,7 @@ Item {
 
   function applyConnection() {
     if (!root.service) return
-    root.service.applyConnection(root.hostDraft.trim(), root.portDraft,
+    root.service.applyConnection(root.hostDraft.trim(), root.portText,
                                  root.userDraft, root.passwordDraft, root.demoDraft)
     root.userDraft = ""
     root.passwordDraft = ""
@@ -78,7 +78,7 @@ Item {
 
   function useServer(item) {
     root.hostDraft = item.host
-    root.portDraft = item.port || 9000
+    root.portText = String(item.port || 9000)
   }
 
   PanelWindow {
@@ -175,13 +175,12 @@ Item {
                   font.family: root.family
                   font.pixelSize: Style.font.body
                 }
-                NumberField {
+                TextField {
                   width: parent.width - Style.space(90)
-                  label: ""
-                  value: root.portDraft
-                  from: 1
-                  to: 65535
-                  onModified: function(v) { root.portDraft = v }
+                  text: root.portText
+                  onTextChanged: root.portText = text
+                  inputMethodHints: Qt.ImhDigitsOnly
+                  placeholderText: "9000"
                 }
               }
 
