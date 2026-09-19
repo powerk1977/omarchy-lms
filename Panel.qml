@@ -259,7 +259,7 @@ Panel {
             width: parent.width
             height: width
             radius: Style.cornerRadius
-            color: Style.hoverFillFor(root.fg, Color.accent)
+            color: "black"
             clip: true
             visible: root.serviceReady && root.lms.configured
             Image {
@@ -279,7 +279,7 @@ Panel {
               color: root.dim
               font.family: root.family
               font.pixelSize: Style.space(40)
-              visible: root.lms.coverUrl === "" || coverImg.status !== Image.Ready
+              visible: root.lms.coverUrl === ""
             }
           }
 
