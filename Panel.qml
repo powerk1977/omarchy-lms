@@ -39,7 +39,18 @@ Panel {
   // authoritative); ticks locally between pushes.
   readonly property int revision: serviceReady ? lms.stateRevision : 0
   property real elapsed: 0
-  onRevisionChanged: elapsed = serviceReady ? (lms.nowplaying.time || 0) : 0
+  // Optimistic volume: what the slider shows while the server catches up.
+  // Holds the commanded value from release until a pushed state confirms it,
+  // so lagging pushes can't drag the knob back through intermediates.
+  property real volumeShown: -1
+  onRevisionChanged: {
+    elapsed = serviceReady ? (lms.nowplaying.time || 0) : 0
+    if (serviceReady && volumeShown >= 0
+        && (lms.nowplaying.volume || 0) === Math.round(volumeShown))
+      volumeShown = -1
+  }
+  readonly property real volumeDisplay: volumeShown >= 0
+    ? volumeShown : (serviceReady ? (lms.nowplaying.volume || 0) : 0)
 
   function mmss(sec) {
     sec = Math.max(0, Math.round(sec || 0))
@@ -246,11 +257,14 @@ Panel {
               id: volume
               width: parent.width - Style.space(28)
               bar: root.bar
-              value: root.lms.nowplaying.volume || 0
+              value: root.volumeDisplay
               minimum: 0
               maximum: 100
               integer: true
-              onMoved: function(v) { root.lms.setVolume(v) }
+              onReleased: function(v) {
+                root.volumeShown = v
+                root.lms.setVolume(v)
+              }
             }
           }
 
