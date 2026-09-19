@@ -263,11 +263,15 @@ Panel {
             clip: true
             visible: root.serviceReady && root.lms.configured
             Image {
+              id: coverImg
               anchors.fill: parent
               source: root.lms.coverUrl
               fillMode: Image.PreserveAspectCrop
               asynchronous: true
-              visible: root.lms.coverUrl !== ""
+              sourceSize.width: width
+              sourceSize.height: height
+              // Hide while (re)loading so a previous cover can never linger
+              visible: root.lms.coverUrl !== "" && coverImg.status === Image.Ready
             }
             Text {
               anchors.centerIn: parent
@@ -275,7 +279,7 @@ Panel {
               color: root.dim
               font.family: root.family
               font.pixelSize: Style.space(40)
-              visible: root.lms.coverUrl === ""
+              visible: root.lms.coverUrl === "" || coverImg.status !== Image.Ready
             }
           }
 

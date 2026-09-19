@@ -249,17 +249,32 @@ class _CoverHandler(BaseHTTPRequestHandler):
             if parsed.path.startswith("/now/"):
                 pid = urllib.parse.unquote(
                     parsed.path[len("/now/"):].rsplit(".", 1)[0])
-                upstream = "%s/music/current/cover.jpg?player=%s" % (
-                    self.proxy.lms_base, urllib.parse.quote(pid))
+                base = "%s/music/current/cover" % self.proxy.lms_base
+                query = "?player=%s" % urllib.parse.quote(pid)
             elif parsed.path.startswith("/cover/"):
                 cid = urllib.parse.unquote(
                     parsed.path[len("/cover/"):].rsplit(".", 1)[0])
-                upstream = "%s/music/%s/cover.jpg" % (self.proxy.lms_base,
-                                                      urllib.parse.quote(cid))
+                base = "%s/music/%s/cover" % (self.proxy.lms_base,
+                                              urllib.parse.quote(cid))
+                query = ""
             else:
                 self.send_error(404)
                 return
-            raw = self.proxy.http.request(upstream, method="GET", limit=MAX_BODY_BYTES)
+            # LMS resizes via a filename suffix. Prefer a small variant so
+            # panel loads stay fast, fall back to the original on failure.
+            raw = b""
+            for spec in ("_600x600_f", ""):
+                try:
+                    raw = self.proxy.http.request(
+                        base + spec + ".jpg" + query,
+                        method="GET", limit=MAX_BODY_BYTES)
+                except HttpError:
+                    if not spec:
+                        raise
+                if raw:
+                    break
+            if not raw:
+                raise HttpError(0, "empty cover response", KIND_NETWORK)
             ctype = "image/jpeg"
             if raw[:4] == b"\x89PNG":
                 ctype = "image/png"

@@ -134,13 +134,15 @@ def test_live_connect_command_and_cover():
 
         # Percent-encoded request paths (as the panel's encodeURIComponent
         # emits) must not be double-encoded when proxied upstream — the player
-        # id the fake LMS sees must round-trip to the real id.
+        # id the fake LMS sees must round-trip to the real id, and the proxy
+        # must ask LMS for a resized variant (fast loads) rather than the
+        # full-size original.
         with urllib.request.urlopen(
                 base_ev["url"] + "/now/" + urllib.parse.quote(PID1, safe="") + ".jpg",
                 timeout=5) as res:
             assert res.read() == COVER_JPEG
         assert fake.cover_paths, fake.cover_paths
-        assert any(urllib.parse.unquote(p) == "/music/current/cover.jpg"
+        assert any(urllib.parse.unquote(p) == "/music/current/cover_600x600_f.jpg"
                    + "?player=" + PID1 for p in fake.cover_paths), fake.cover_paths
 
         # A command round-trips and is reflected back to the client.
