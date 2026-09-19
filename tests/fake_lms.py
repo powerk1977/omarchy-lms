@@ -31,6 +31,7 @@ class FakeLMS:
         self.connect_calls = 0
         self.cover_paths = []  # every cover-art request path the bridge proxied
         self.push_channel = ""  # /slim/subscribe response channel the bridge chose
+        self.pending_pushes = []  # statuses queued by state-changing commands
         self._server = None
         self._thread = None
         self.port = 0
@@ -53,6 +54,19 @@ class FakeLMS:
 
     # -- protocol -----------------------------------------------------------
 
+    def _status_payload(self):
+        """The status dict this fake reports for its current state."""
+        return {
+            "mode": self.mode,
+            "power": 1 if self.mode != "stop" else 0,
+            "time": 12,
+            "mixer volume": self.volume,
+            "playlist_cur_index": str(self.cur_index),
+            "playlist_loop": [{"id": 99, "title": "Test Song",
+                               "artist": "Test Artist", "album": "Test Album",
+                               "duration": 200, "coverid": "cover42"}],
+        }
+
     def jsonrpc(self, player, cli):
         self.commands.append((player, list(cli)))
         cmd = cli[0] if cli else ""
@@ -62,22 +76,16 @@ class FakeLMS:
         if cmd == "players":
             return {"count": len(PLAYERS), "players_loop": PLAYERS}
         if cmd == "status":
-            return {
-                "mode": self.mode,
-                "power": 1 if self.mode != "stop" else 0,
-                "time": 12,
-                "mixer volume": self.volume,
-                "playlist_cur_index": str(self.cur_index),
-                "playlist_loop": [{"id": 99, "title": "Test Song",
-                                   "artist": "Test Artist", "album": "Test Album",
-                                   "duration": 200, "coverid": "cover42"}],
-            }
+            return self._status_payload()
         if cmd == "pause":
             self.mode = "pause" if str(cli[1]) == "1" else "play"
         elif cmd == "play":
             self.mode = "play"
         elif cmd == "mixer":
             self.volume = int(cli[2])
+        # Like the real LMS: a state-changing command triggers an async push.
+        if cmd in ("pause", "play", "mixer", "playlist", "time", "power"):
+            self.pending_pushes.append(self._status_payload())
         return {}
 
 
@@ -169,6 +177,14 @@ class _Handler(BaseHTTPRequestHandler):
                                                     "duration": 200,
                                                     "coverid": "cover99"}]},
                         "advice": {"reconnect": "retry"}})
+                # Deliver statuses queued by state-changing commands, the way
+                # LMS pushes asynchronously after a command.
+                while self.fake.pending_pushes:
+                    payload = self.fake.pending_pushes.pop(0)
+                    replies.append({"channel": self.fake.push_channel,
+                                    "id": mid, "data": payload,
+                                    "advice": {"reconnect": "retry"}})
+                    break
                 else:
                     time.sleep(0.05)
                     replies.append({"channel": channel, "id": mid, "successful": True,

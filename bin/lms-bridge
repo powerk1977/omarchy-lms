@@ -539,10 +539,9 @@ class Bridge:
             return
         try:
             jsonrpc(self._http, player, cli)
-            # Reflect the change immediately rather than waiting for the push.
-            if player and cli and cli[0] in ("pause", "play", "power", "mixer",
-                                             "playlist", "time", "sync", "syncgroups"):
-                self._emit_state(player, self._query_status(player))
+            # State updates arrive via the cometd push. An immediate re-query
+            # here races LMS's status cache and used to emit stale data — the
+            # old track/cover flashing between skips.
             self._result(tag, True)
         except HttpError as e:
             self._result(tag, False, str(e))
