@@ -61,8 +61,20 @@ Panel {
   // ---- search mode ----
   property bool searchMode: false
   property string searchText: ""
+  // Keyboard-driven result selection (arrow keys + Enter); reset on refresh.
+  property int selectedIndex: 0
   readonly property var searchHit: serviceReady ? lms.searchResults : null
   readonly property int searchRevision: serviceReady ? lms.searchRevision : 0
+  onSearchRevisionChanged: selectedIndex = 0
+  // Keep the keyboard-selected result visible in the panel's scroll area.
+  onSelectedIndexChanged: {
+    if (!opened || !searchMode) return
+    var row = resultsRepeater.itemAt(selectedIndex)
+    if (!row) return
+    var y = row.mapToItem(scroll, 0, 0).y
+    if (y < 0) scroll.contentY += y
+    else if (y + row.height > scroll.height) scroll.contentY += y + row.height - scroll.height
+  }
   readonly property bool searchBusy: searchHit === null && searchText !== ""
 
   function enterSearch() {
@@ -109,7 +121,12 @@ Panel {
   readonly property color barIconColor: phase === "error"
     ? (bar ? bar.urgent : Color.urgent) : iconColor
 
-  onOpenedChanged: if (opened && root.serviceReady) root.lms.refresh()
+  onOpenedChanged: {
+    if (opened && root.serviceReady) root.lms.refresh()
+    // Leaving the panel resets any in-progress search so a fresh open
+    // starts on the now-playing view, not a stale query.
+    if (!opened && root.searchMode) root.exitSearch()
+  }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -256,10 +273,11 @@ Panel {
                 root.searchText = text
                 searchDebounce.restart()
               }
-              onAccepted: {
-                searchDebounce.stop()
-                root.runSearch(text)
-              }
+              // Enter plays the selected result; with nothing selected yet it
+              // forces the search (covers the no-results-yet case).
+              onAccepted: searchCol.playSelectedOrSearch()
+              Keys.onDownPressed: searchCol.moveSelection(1)
+              Keys.onUpPressed: searchCol.moveSelection(-1)
             }
             Timer {
               id: searchDebounce
@@ -270,8 +288,39 @@ Panel {
             // Results echo the query; ignore stale responses.
             readonly property var hits: root.searchHit && root.searchHit.q === root.searchText
               ? root.searchHit : null
-            readonly property bool anyHits: hits && (hits.albums.length > 0
-              || hits.artists.length > 0 || hits.playlists.length > 0)
+            // Flat, display-ordered result list (albums, then artists, then
+            // playlists) so arrow-key selection is a single index over one model.
+            readonly property var flatResults: {
+              if (!hits) return []
+              var out = []
+              var albums = hits.albums || [], artists = hits.artists || [],
+                  playlists = hits.playlists || []
+              for (var i = 0; i < albums.length; i++)
+                out.push({ kind: "album", id: albums[i].id, name: albums[i].name,
+                           artist: albums[i].artist, year: albums[i].year,
+                           coverId: albums[i].coverId })
+              for (var j = 0; j < artists.length; j++)
+                out.push({ kind: "artist", id: artists[j].id, name: artists[j].name })
+              for (var k = 0; k < playlists.length; k++)
+                out.push({ kind: "playlist", id: playlists[k].id, name: playlists[k].name })
+              return out
+            }
+            readonly property bool anyHits: flatResults.length > 0
+
+            function moveSelection(delta) {
+              var n = flatResults.length
+              if (n === 0) return
+              root.selectedIndex = (root.selectedIndex + delta + n) % n
+            }
+            function playSelectedOrSearch() {
+              if (flatResults.length === 0) {
+                searchDebounce.stop()
+                root.runSearch(root.searchText)
+                return
+              }
+              var hit = flatResults[root.selectedIndex]
+              root.playSelection(hit.kind, hit.id)
+            }
 
             Text {
               width: parent.width
@@ -283,154 +332,130 @@ Panel {
             Text {
               width: parent.width
               visible: searchCol.anyHits
-              text: "Enter plays now · + adds to queue"
+              text: "\u2191\u2193 select \u00B7 Enter plays now \u00B7 + adds to queue"
               color: root.dim
               opacity: 0.7
               font.pixelSize: Style.font.caption
             }
 
             Repeater {
-              model: searchCol.hits ? searchCol.hits.albums : []
+              id: resultsRepeater
+              model: searchCol.flatResults
 
-              Row {
-                id: albumRow
+              Rectangle {
+                id: resultRow
                 required property var modelData
-                width: parent.width
-                spacing: Style.spacing.sm
+                required property int index
+                width: searchCol.width
+                height: resultInner.implicitHeight + Style.space(12)
+                radius: Style.cornerRadius
+                color: resultRow.index === root.selectedIndex
+                  ? root.selectedFill : "transparent"
 
-                Rectangle {
-                  width: Style.space(36)
-                  height: Style.space(36)
-                  radius: Style.cornerRadius
-                  color: "black"
-                  clip: true
-                  Image {
-                    anchors.fill: parent
-                    source: root.lms.coverBase !== "" && albumRow.modelData.coverId
-                      ? root.lms.coverBase + "/cover/" + albumRow.modelData.coverId + ".jpg" : ""
-                    fillMode: Image.PreserveAspectCrop
-                    asynchronous: true
-                    visible: status === Image.Ready
+                // Row click plays directly; declared first so the play/add
+                // buttons on top keep their own clicks.
+                MouseArea {
+                  anchors.fill: parent
+                  onClicked: {
+                    root.selectedIndex = resultRow.index
+                    root.playSelection(resultRow.modelData.kind, resultRow.modelData.id)
+                  }
+                }
+
+                Row {
+                  id: resultInner
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(6)
+                  anchors.rightMargin: Style.space(6)
+                  spacing: Style.spacing.sm
+
+                  Rectangle {
+                    width: Style.space(36)
+                    height: Style.space(36)
+                    radius: Style.cornerRadius
+                    color: "black"
+                    clip: true
+                    visible: resultRow.modelData.kind === "album"
+                    Image {
+                      anchors.fill: parent
+                      source: root.lms.coverBase !== "" && resultRow.modelData.coverId
+                        ? root.lms.coverBase + "/cover/" + resultRow.modelData.coverId + ".jpg" : ""
+                      fillMode: Image.PreserveAspectCrop
+                      asynchronous: true
+                      visible: status === Image.Ready
+                    }
+                    Text {
+                      anchors.centerIn: parent
+                      visible: resultRow.modelData.coverId === ""
+                      text: root.glyphNote
+                      color: root.dim
+                      font.family: root.family
+                      font.pixelSize: Style.space(18)
+                    }
                   }
                   Text {
-                    anchors.centerIn: parent
-                    visible: albumRow.modelData.coverId === ""
+                    width: Style.space(36)
+                    height: Style.space(36)
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    visible: resultRow.modelData.kind === "artist"
                     text: root.glyphNote
                     color: root.dim
                     font.family: root.family
                     font.pixelSize: Style.space(18)
                   }
-                }
-                Column {
-                  width: parent.width - Style.space(36 + 84)
-                  spacing: 0
                   Text {
-                    width: parent.width
-                    text: albumRow.modelData.name || "—"
-                    color: root.fg
-                    font.bold: true
-                    font.pixelSize: Style.font.body
-                    elide: Text.ElideRight
-                  }
-                  Text {
-                    width: parent.width
-                    text: (albumRow.modelData.artist || "") + (albumRow.modelData.year ? " \u00B7 " + albumRow.modelData.year : "")
+                    width: Style.space(36)
+                    height: Style.space(36)
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    visible: resultRow.modelData.kind === "playlist"
+                    text: "󰎆"    // md-playlist-play
                     color: root.dim
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
+                    font.family: root.family
+                    font.pixelSize: Style.space(18)
                   }
-                }
-                PanelActionButton {
-                  iconText: root.glyphPlay
-                  size: Style.space(30)
-                  fontFamily: root.family
-                  foreground: root.fg
-                  color: "transparent"
-                  tooltipText: "Play now"
-                  onClicked: root.playSelection("album", albumRow.modelData.id)
-                }
-                PanelActionButton {
-                  iconText: "󰐕"    // md-plus
-                  size: Style.space(30)
-                  fontFamily: root.family
-                  foreground: root.fg
-                  color: "transparent"
-                  tooltipText: "Add to queue"
-                  onClicked: root.enqueueSelection("album", albumRow.modelData.id)
-                }
-              }
-            }
 
-            Repeater {
-              model: searchCol.hits ? searchCol.hits.artists : []
+                  Column {
+                    width: parent.width - Style.space(36 + 84)
+                    spacing: 0
+                    Text {
+                      width: parent.width
+                      text: resultRow.modelData.name || "\u2014"
+                      color: root.fg
+                      font.bold: resultRow.modelData.kind === "album"
+                      font.pixelSize: Style.font.body
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      width: parent.width
+                      visible: resultRow.modelData.kind === "album"
+                      text: (resultRow.modelData.artist || "") + (resultRow.modelData.year ? " \u00B7 " + resultRow.modelData.year : "")
+                      color: root.dim
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                    }
+                  }
 
-              Row {
-                id: artistRow
-                required property var modelData
-                width: parent.width
-                spacing: Style.spacing.sm
-
-                Text {
-                  width: Style.space(36)
-                  verticalAlignment: Text.AlignVCenter
-                  text: root.glyphNote
-                  color: root.dim
-                  font.family: root.family
-                  font.pixelSize: Style.space(18)
-                }
-                Text {
-                  width: parent.width - Style.space(36 + 84)
-                  verticalAlignment: Text.AlignVCenter
-                  text: artistRow.modelData.name || "—"
-                  color: root.fg
-                  font.pixelSize: Style.font.body
-                  elide: Text.ElideRight
-                }
-                PanelActionButton {
-                  iconText: root.glyphPlay
-                  size: Style.space(30)
-                  fontFamily: root.family
-                  foreground: root.fg
-                  color: "transparent"
-                  tooltipText: "Play now"
-                  onClicked: root.playSelection("artist", artistRow.modelData.id)
-                }
-              }
-            }
-
-            Repeater {
-              model: searchCol.hits ? searchCol.hits.playlists : []
-
-              Row {
-                id: playlistRow
-                required property var modelData
-                width: parent.width
-                spacing: Style.spacing.sm
-
-                Text {
-                  width: Style.space(36)
-                  verticalAlignment: Text.AlignVCenter
-                  text: "󰎆"    // md-playlist-play
-                  color: root.dim
-                  font.family: root.family
-                  font.pixelSize: Style.space(18)
-                }
-                Text {
-                  width: parent.width - Style.space(36 + 84)
-                  verticalAlignment: Text.AlignVCenter
-                  text: playlistRow.modelData.name || "—"
-                  color: root.fg
-                  font.pixelSize: Style.font.body
-                  elide: Text.ElideRight
-                }
-                PanelActionButton {
-                  iconText: root.glyphPlay
-                  size: Style.space(30)
-                  fontFamily: root.family
-                  foreground: root.fg
-                  color: "transparent"
-                  tooltipText: "Play now"
-                  onClicked: root.playSelection("playlist", playlistRow.modelData.id)
+                  PanelActionButton {
+                    iconText: root.glyphPlay
+                    size: Style.space(30)
+                    fontFamily: root.family
+                    foreground: root.fg
+                    color: "transparent"
+                    tooltipText: "Play now"
+                    onClicked: root.playSelection(resultRow.modelData.kind, resultRow.modelData.id)
+                  }
+                  PanelActionButton {
+                    visible: resultRow.modelData.kind === "album"
+                    iconText: "󰐕"    // md-plus
+                    size: Style.space(30)
+                    fontFamily: root.family
+                    foreground: root.fg
+                    color: "transparent"
+                    tooltipText: "Add to queue"
+                    onClicked: root.enqueueSelection(resultRow.modelData.kind, resultRow.modelData.id)
+                  }
                 }
               }
             }
