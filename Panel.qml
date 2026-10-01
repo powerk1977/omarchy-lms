@@ -221,7 +221,7 @@ Panel {
               Row {
                 spacing: Style.spacing.xs
                 PanelActionButton {
-                  iconText: "\uF349"    // md-magnify
+                  iconText: "󰍉"    // md-magnify 
                   fontFamily: root.family
                   tooltipText: "Search (/)"
                   foreground: root.searchMode ? Color.accent : Qt.darker(root.fg, 1.4)
@@ -283,7 +283,7 @@ Panel {
             Text {
               width: parent.width
               visible: searchCol.anyHits
-              text: "Enter plays now \u00B7 + adds to queue"
+              text: "Enter plays now · + adds to queue"
               color: root.dim
               opacity: 0.7
               font.pixelSize: Style.font.caption
@@ -350,7 +350,7 @@ Panel {
                   onClicked: root.playSelection("album", albumRow.modelData.id)
                 }
                 PanelActionButton {
-                  iconText: "\uF666"    // md-plus
+                  iconText: "󰐕"    // md-plus
                   size: Style.space(30)
                   fontFamily: root.family
                   foreground: root.fg
@@ -410,7 +410,7 @@ Panel {
                 Text {
                   width: Style.space(36)
                   verticalAlignment: Text.AlignVCenter
-                  text: "\uF386"    // md-playlist-play
+                  text: "󰎆"    // md-playlist-play
                   color: root.dim
                   font.family: root.family
                   font.pixelSize: Style.space(18)
