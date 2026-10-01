@@ -400,6 +400,7 @@ class Bridge:
             "discover": self._handle_discover,
             "selectPlayer": self._handle_select,
             "cmd": self._handle_cmd,
+            "search": self._handle_search,
         }
         if op == "shutdown":
             self.emit({"ev": "exited", "reason": "shutdown"})
@@ -584,6 +585,60 @@ class Bridge:
                    "generation": self._generation})
         if not servers:
             self._log("info", "discovery found no servers on the local subnet")
+
+    # -- search -------------------------------------------------------------
+
+    def _handle_search(self, msg):
+        """Panel search: albums / artists / playlists matching a query.
+
+        Tracks are deliberately NOT queried: track search hangs this LMS
+        instance indefinitely (verified: 60s+ with no response, while
+        albums/artists/playlists answer in milliseconds). Revisit only if
+        the server-side hang is ever resolved.
+        """
+        tag = msg.get("tag", "")
+        query = str(msg.get("q") or "").strip()
+        if self._demo:
+            self.emit({"ev": "searchResults", "tag": tag, "q": query,
+                       "albums": [{"id": 1, "name": "Demo Album", "artist": "Demo Artist",
+                                   "year": 2024, "coverId": ""}],
+                       "artists": [], "playlists": [],
+                       "generation": self._generation})
+            self._result(tag, True)
+            return
+        if not self._http:
+            self._result(tag, False, "not connected")
+            return
+        if not query:
+            self.emit({"ev": "searchResults", "tag": tag, "q": "",
+                       "albums": [], "artists": [], "playlists": [],
+                       "generation": self._generation})
+            self._result(tag, True)
+            return
+        try:
+            # Quotes would break the CLI framing; search terms don't need them.
+            s = query.replace('"', " ")
+            albums = jsonrpc(self._http, "", ["albums", 0, 8, "search:%s" % s,
+                                              "tags:jaly"]).get("albums_loop", []) or []
+            artists = jsonrpc(self._http, "", ["artists", 0, 8, "search:%s" % s]
+                              ).get("artists_loop", []) or []
+            playlists = jsonrpc(self._http, "", ["playlists", 0, 8, "search:%s" % s]
+                                ).get("playlists_loop", []) or []
+            self.emit({
+                "ev": "searchResults", "tag": tag, "q": query,
+                "albums": [{"id": a.get("id"), "name": a.get("album") or "",
+                            "artist": a.get("artist") or "",
+                            "year": a.get("year") or "",
+                            "coverId": a.get("artwork_track_id") or ""}
+                           for a in albums],
+                "artists": [{"id": a.get("id"), "name": a.get("artist") or ""}
+                            for a in artists],
+                "playlists": [{"id": p.get("id"), "name": p.get("playlist") or ""}
+                              for p in playlists],
+                "generation": self._generation})
+            self._result(tag, True)
+        except HttpError as e:
+            self._result(tag, False, str(e))
 
     # -- teardown -----------------------------------------------------------
 

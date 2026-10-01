@@ -265,6 +265,38 @@ def test_bridge_survives_bad_messages():
     print("ok bridge survives bad messages")
 
 
+def test_search_op():
+    fake = FakeLMS().start()
+    bp = BridgeProc()
+    try:
+        bp.wait_for(lambda e: e.get("ev") == "hello")
+        bp.send({"op": "config", "generation": 1, "host": "127.0.0.1",
+                 "port": fake.port, "playerId": PID1})
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+
+        bp.send({"op": "search", "q": "The", "tag": "s1"})
+        res = bp.wait_for(lambda e: e.get("ev") == "searchResults" and e.get("tag") == "s1")
+        assert res["q"] == "The", res
+        assert res["albums"] == [{"id": 656, "name": "The Wall",
+                                  "artist": "Pink Floyd", "year": 1979,
+                                  "coverId": "e4a46d1b"}], res
+        assert res["artists"] == [{"id": 812, "name": "The Jam"}], res
+        assert res["playlists"] == [{"id": 5, "name": "The Mixtape"}], res
+        bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "s1"
+                    and e.get("success") is True)
+
+        # Empty query returns empty results without touching the server.
+        n_cmds = len(fake.commands)
+        bp.send({"op": "search", "q": "  ", "tag": "s2"})
+        res2 = bp.wait_for(lambda e: e.get("ev") == "searchResults" and e.get("tag") == "s2")
+        assert res2["albums"] == [] and res2["artists"] == [], res2
+        assert len(fake.commands) == n_cmds, fake.commands
+    finally:
+        bp.close()
+        fake.stop()
+    print("ok search op")
+
+
 if __name__ == "__main__":
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     test_demo_sequence()
@@ -274,4 +306,5 @@ if __name__ == "__main__":
     test_nowplaying_hardening()
     test_bridge_survives_bad_messages()
     test_refresh_op_signature()
+    test_search_op()
     print("\nall bridge tests passed")

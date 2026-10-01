@@ -74,6 +74,12 @@ QtObject {
   property string coverBase: ""
   property int stateRevision: 0
 
+  // Panel search (albums/artists/playlists; tracks excluded — server hang).
+  // searchResults is the raw searchResults event; searchRevision ticks so
+  // Panel bindings re-evaluate even when the shape is unchanged.
+  property var searchResults: null
+  property int searchRevision: 0
+
   readonly property var activePlayer: {
     for (var i = 0; i < root.players.length; i++) {
       if (root.players[i].playerid === root.activePlayerId) return root.players[i]
@@ -230,6 +236,10 @@ QtObject {
   function setVolume(percent) { root.sendCmd(["mixer", "volume", Math.round(percent)], "volume") }
   function seek(sec) { root.sendCmd(["time", Math.round(sec)], "transport") }
 
+  function search(q) {
+    bridgeController.send({ op: "search", q: String(q || ""), tag: "search" })
+  }
+
   // ------------------------------------------------------------ bridge
 
   property BridgeController bridgeController: BridgeController {
@@ -278,6 +288,10 @@ QtObject {
       break
     case "coverbase":
       root.coverBase = ev.url || ""
+      break
+    case "searchResults":
+      root.searchResults = ev
+      root.searchRevision += 1
       break
     case "servers":
       root.serversFound = ev.items || []

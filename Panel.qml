@@ -58,6 +58,38 @@ Panel {
     return Math.floor(sec / 60) + ":" + (s < 10 ? "0" : "") + s
   }
 
+  // ---- search mode ----
+  property bool searchMode: false
+  property string searchText: ""
+  readonly property var searchHit: serviceReady ? lms.searchResults : null
+  readonly property int searchRevision: serviceReady ? lms.searchRevision : 0
+  readonly property bool searchBusy: searchHit === null && searchText !== ""
+
+  function enterSearch() {
+    if (!serviceReady || !lms.configured) return
+    searchMode = true
+    Qt.callLater(function() { if (root.searchMode) searchField.forceActiveFocus() })
+  }
+  function exitSearch() {
+    searchMode = false
+    searchText = ""
+    if (serviceReady) lms.search("")
+  }
+  function runSearch(q) {
+    if (serviceReady) lms.search(q)
+  }
+  // Play now: load the selection into the queue and start; then leave search
+  // mode so the panel shows the now-playing card that just started.
+  function playSelection(kind, id) {
+    if (!serviceReady) return
+    lms.sendCmd(["playlistcontrol", "cmd:load", kind + "_id:" + id], "search")
+    lms.sendCmd(["mode", "play"], "search")
+    exitSearch()
+  }
+  function enqueueSelection(kind, id) {
+    if (serviceReady) lms.sendCmd(["playlistcontrol", "cmd:add", kind + "_id:" + id], "search")
+  }
+
   Timer {
     interval: 1000
     repeat: true
@@ -149,9 +181,13 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        if (root.searchMode) root.exitSearch()
+        else root.close()
+      }
       onTextKey: function(key) {
-        if (String(key).toLowerCase() === "s") root.openSettings()
+        if (String(key) === "/") root.enterSearch()
+        else if (String(key).toLowerCase() === "s") root.openSettings()
       }
 
       Flickable {
@@ -185,6 +221,13 @@ Panel {
               Row {
                 spacing: Style.spacing.xs
                 PanelActionButton {
+                  iconText: "\uF349"    // md-magnify
+                  fontFamily: root.family
+                  tooltipText: "Search (/)"
+                  foreground: root.searchMode ? Color.accent : Qt.darker(root.fg, 1.4)
+                  onClicked: root.searchMode ? root.exitSearch() : root.enterSearch()
+                }
+                PanelActionButton {
                   iconText: root.glyphGear
                   fontFamily: root.family
                   tooltipText: "Settings"
@@ -195,17 +238,215 @@ Panel {
             }
           }
 
+          // ---- search mode ----
+          Column {
+            id: searchCol
+            width: parent.width
+            spacing: Style.spacing.sm
+            visible: root.serviceReady && root.searchMode
+
+            TextField {
+              id: searchField
+              width: parent.width
+              placeholderText: "Search albums, artists, playlists"
+              color: root.fg
+              font.family: root.family
+              font.pixelSize: Style.font.body
+              onTextChanged: {
+                root.searchText = text
+                searchDebounce.restart()
+              }
+              onAccepted: {
+                searchDebounce.stop()
+                root.runSearch(text)
+              }
+            }
+            Timer {
+              id: searchDebounce
+              interval: 250
+              onTriggered: root.runSearch(root.searchText)
+            }
+
+            // Results echo the query; ignore stale responses.
+            readonly property var hits: root.searchHit && root.searchHit.q === root.searchText
+              ? root.searchHit : null
+            readonly property bool anyHits: hits && (hits.albums.length > 0
+              || hits.artists.length > 0 || hits.playlists.length > 0)
+
+            Text {
+              width: parent.width
+              visible: root.searchText !== "" && !searchCol.anyHits
+              text: "No matches"
+              color: root.dim
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              width: parent.width
+              visible: searchCol.anyHits
+              text: "Enter plays now \u00B7 + adds to queue"
+              color: root.dim
+              opacity: 0.7
+              font.pixelSize: Style.font.caption
+            }
+
+            Repeater {
+              model: searchCol.hits ? searchCol.hits.albums : []
+
+              Row {
+                id: albumRow
+                required property var modelData
+                width: parent.width
+                spacing: Style.spacing.sm
+
+                Rectangle {
+                  width: Style.space(36)
+                  height: Style.space(36)
+                  radius: Style.cornerRadius
+                  color: "black"
+                  clip: true
+                  Image {
+                    anchors.fill: parent
+                    source: root.lms.coverBase !== "" && albumRow.modelData.coverId
+                      ? root.lms.coverBase + "/cover/" + albumRow.modelData.coverId + ".jpg" : ""
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true
+                    visible: status === Image.Ready
+                  }
+                  Text {
+                    anchors.centerIn: parent
+                    visible: albumRow.modelData.coverId === ""
+                    text: root.glyphNote
+                    color: root.dim
+                    font.family: root.family
+                    font.pixelSize: Style.space(18)
+                  }
+                }
+                Column {
+                  width: parent.width - Style.space(36 + 84)
+                  spacing: 0
+                  Text {
+                    width: parent.width
+                    text: albumRow.modelData.name || "—"
+                    color: root.fg
+                    font.bold: true
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    width: parent.width
+                    text: (albumRow.modelData.artist || "") + (albumRow.modelData.year ? " \u00B7 " + albumRow.modelData.year : "")
+                    color: root.dim
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
+                PanelActionButton {
+                  iconText: root.glyphPlay
+                  size: Style.space(30)
+                  fontFamily: root.family
+                  foreground: root.fg
+                  color: "transparent"
+                  tooltipText: "Play now"
+                  onClicked: root.playSelection("album", albumRow.modelData.id)
+                }
+                PanelActionButton {
+                  iconText: "\uF666"    // md-plus
+                  size: Style.space(30)
+                  fontFamily: root.family
+                  foreground: root.fg
+                  color: "transparent"
+                  tooltipText: "Add to queue"
+                  onClicked: root.enqueueSelection("album", albumRow.modelData.id)
+                }
+              }
+            }
+
+            Repeater {
+              model: searchCol.hits ? searchCol.hits.artists : []
+
+              Row {
+                id: artistRow
+                required property var modelData
+                width: parent.width
+                spacing: Style.spacing.sm
+
+                Text {
+                  width: Style.space(36)
+                  verticalAlignment: Text.AlignVCenter
+                  text: root.glyphNote
+                  color: root.dim
+                  font.family: root.family
+                  font.pixelSize: Style.space(18)
+                }
+                Text {
+                  width: parent.width - Style.space(36 + 84)
+                  verticalAlignment: Text.AlignVCenter
+                  text: artistRow.modelData.name || "—"
+                  color: root.fg
+                  font.pixelSize: Style.font.body
+                  elide: Text.ElideRight
+                }
+                PanelActionButton {
+                  iconText: root.glyphPlay
+                  size: Style.space(30)
+                  fontFamily: root.family
+                  foreground: root.fg
+                  color: "transparent"
+                  tooltipText: "Play now"
+                  onClicked: root.playSelection("artist", artistRow.modelData.id)
+                }
+              }
+            }
+
+            Repeater {
+              model: searchCol.hits ? searchCol.hits.playlists : []
+
+              Row {
+                id: playlistRow
+                required property var modelData
+                width: parent.width
+                spacing: Style.spacing.sm
+
+                Text {
+                  width: Style.space(36)
+                  verticalAlignment: Text.AlignVCenter
+                  text: "\uF386"    // md-playlist-play
+                  color: root.dim
+                  font.family: root.family
+                  font.pixelSize: Style.space(18)
+                }
+                Text {
+                  width: parent.width - Style.space(36 + 84)
+                  verticalAlignment: Text.AlignVCenter
+                  text: playlistRow.modelData.name || "—"
+                  color: root.fg
+                  font.pixelSize: Style.font.body
+                  elide: Text.ElideRight
+                }
+                PanelActionButton {
+                  iconText: root.glyphPlay
+                  size: Style.space(30)
+                  fontFamily: root.family
+                  foreground: root.fg
+                  color: "transparent"
+                  tooltipText: "Play now"
+                  onClicked: root.playSelection("playlist", playlistRow.modelData.id)
+                }
+              }
+            }
+          }
+
           // ---- not configured / error ----
           Text {
             width: parent.width
-            visible: !root.serviceReady || !root.lms.configured
+            visible: !root.searchMode && (!root.serviceReady || !root.lms.configured)
             text: root.serviceReady ? "No Lyrion server configured" : "Service unavailable"
             color: root.fg
             wrapMode: Text.WordWrap
           }
           Text {
             width: parent.width
-            visible: root.phase === "error" && root.lms && root.lms.lastError !== ""
+            visible: !root.searchMode && root.phase === "error" && root.lms && root.lms.lastError !== ""
             text: root.lms ? root.lms.lastError : ""
             color: bar ? bar.urgent : Color.urgent
             wrapMode: Text.WordWrap
@@ -215,7 +456,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.spacing.sm
-            visible: root.serviceReady && root.lms.players.length > 0
+            visible: !root.searchMode && root.serviceReady && root.lms.players.length > 0
             PanelSectionHeader {
               text: "Players"
               color: root.fg
@@ -244,7 +485,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.spacing.md
-            visible: root.serviceReady && root.lms.configured
+            visible: !root.searchMode && root.serviceReady && root.lms.configured
             Text {
               text: (root.lms.nowplaying.volume || 0) === 0
                 ? root.glyphVolOff : root.glyphVolHi
@@ -275,7 +516,7 @@ Panel {
             radius: Style.cornerRadius
             color: "black"
             clip: true
-            visible: root.serviceReady && root.lms.configured
+            visible: !root.searchMode && root.serviceReady && root.lms.configured
             Image {
               id: coverImg
               anchors.fill: parent
@@ -301,7 +542,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.spacing.sm
-            visible: root.serviceReady && root.lms.configured
+            visible: !root.searchMode && root.serviceReady && root.lms.configured
               && (root.lms.nowplaying.duration || 0) > 0
             Text {
               text: root.mmss(progress.dragging ? progress.liveValue : root.elapsed)
@@ -336,7 +577,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.spacing.xs
-            visible: root.serviceReady && root.lms.configured
+            visible: !root.searchMode && root.serviceReady && root.lms.configured
             Text {
               width: parent.width
               text: root.lms.title || "—"
@@ -366,7 +607,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.spacing.lg
-            visible: root.serviceReady && root.lms.configured && root.lms.players.length > 0
+            visible: !root.searchMode && root.serviceReady && root.lms.configured && root.lms.players.length > 0
             PanelActionButton {
               iconText: root.glyphPrev            // previous
               size: Style.space(40)

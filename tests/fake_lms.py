@@ -77,6 +77,22 @@ class FakeLMS:
             return {"count": len(PLAYERS), "players_loop": PLAYERS}
         if cmd == "status":
             return self._status_payload()
+        if cmd in ("albums", "artists", "playlists"):
+            term = ""
+            for part in cli[3:]:
+                if part.startswith("search:"):
+                    term = part[len("search:"):].lower()
+            if "the" not in term:
+                return {"count": 0, cmd + "_loop": []}
+            if cmd == "albums":
+                return {"count": 1, "albums_loop": [
+                    {"id": 656, "album": "The Wall", "artist": "Pink Floyd",
+                     "year": 1979, "artwork_track_id": "e4a46d1b"}]}
+            if cmd == "artists":
+                return {"count": 1, "artists_loop": [
+                    {"id": 812, "artist": "The Jam"}]}
+            return {"count": 1, "playlists_loop": [
+                {"id": 5, "playlist": "The Mixtape"}]}
         if cmd == "pause":
             self.mode = "pause" if str(cli[1]) == "1" else "play"
         elif cmd == "play":
