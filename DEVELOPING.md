@@ -1,11 +1,12 @@
 # Lyrion Music for Omarchy
 
 Control Lyrion Music Server (LMS / Squeezebox) players from the bar: now
-playing, transport, volume, player selection, and per-server credentials.
+playing, transport, volume, player selection, queue management, shuffle,
+search, keyboard navigation, and per-server credentials.
 
 A long-lived Python helper (`bin/lms-bridge`, standard library only) owns the
-LMS connection and talks NDJSON protocol v1 on stdin/stdout, mirroring
-`io.github.powerk1977.openhab`. Credentials travel over stdin via the `config`
+LMS connection and talks NDJSON protocol v1 on stdin/stdout. Credentials
+travel over stdin via the `config`
 op, are stored in the system keyring only (`CredentialManager.qml`,
 `secret-tool`, service `omarchy-lms`), and never appear in argv or config.
 
@@ -17,7 +18,9 @@ Runtime dependency: Python 3.11+ (no pip/npm/venv) and `secret-tool`.
   bridge process, player/now-playing state for the widgets.
 - `BridgeController.qml`: process lifecycle + NDJSON transport.
 - `CredentialManager.qml`: serialized system-keyring access.
-- `Panel.qml`: bar widget — player list, now playing, transport, volume.
+- `Panel.qml`: bar widget + panel — player list, now playing, transport,
+  volume, queue mode (browse/jump/delete/clear), shuffle toggle, search,
+  keyboard navigation.
 - `Settings.qml`: connection overlay — host/port, discover, keyring password.
 - `bin/lms-bridge`: LMS JSON-RPC (`/jsonrpc.js`) + CometD long-poll adapter,
   cover-art proxy on `127.0.0.1`, and the `lms-bridge pick <query>` terminal
@@ -36,9 +39,9 @@ is an in-process fake LMS.
 
 ```sh
 omarchy plugin validate .
-/usr/lib/qt6/bin/qmllint -I /usr/lib/qt6/qml -I /path/to/shell qml  # see below
+/usr/lib/qt6/bin/qmllint -I /usr/lib/qt6/qml -I /usr/share/omarchy/shell Panel.qml Service.qml Settings.qml
 ```
 
-`qs.Ui`/`qs.Commons` live under the Omarchy source tree (e.g.
-`/usr/share/omarchy/shell/{Ui,Commons}`); qmllint expects the standard
+`qs.Ui`/`qs.Commons` live under the Omarchy source tree
+(`/usr/share/omarchy/shell/{Ui,Commons}`); qmllint expects the standard
 `qs/<name>` layout, so point `-I` at a directory where those resolve.

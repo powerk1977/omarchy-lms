@@ -5,7 +5,16 @@
   "version": "0.1.0",
   "author": "powerk1977",
   "license": "MIT",
-  "description": "Control Lyrion Music Server (Squeezebox) players from the Omarchy bar — now playing, transport, volume, and player selection.",
+  "homepage": "https://github.com/powerk1977/omarchy-lms",
+  "repository": "https://github.com/powerk1977/omarchy-lms",
+  "keywords": [
+    "lms",
+    "lyrion",
+    "squeezebox",
+    "music",
+    "media"
+  ],
+  "description": "Control Lyrion Music Server (Squeezebox) players from the Omarchy bar — now playing, transport, volume, player selection, queue management, shuffle, and search.",
   "kinds": [
     "service",
     "bar-widget",
@@ -19,7 +28,7 @@
   },
   "barWidget": {
     "displayName": "OmaLMS",
-    "description": "Now playing, transport, volume, and player selection for Lyrion Music Server.",
+    "description": "Now playing, transport, volume, player selection, queue, shuffle, and search for Lyrion Music Server.",
     "category": "Media",
     "aliases": [
       "lms",
