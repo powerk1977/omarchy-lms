@@ -58,11 +58,15 @@ class FakeLMS:
 
     # -- protocol -----------------------------------------------------------
 
-    def _status_payload(self, start="-"):
+    def _status_payload(self, start="-", count=1, tags=""):
         """The status dict this fake reports for its current state.
 
-        Honours the LMS `status <start> ...` semantics: `-` starts at the
-        currently playing track, a numeric start at that playlist position.
+        Honours the LMS `status <start> <count> <tags>` semantics: `-` starts
+        at the currently playing track, a numeric start at that playlist
+        position, and count bounds the returned playlist slice. Requested tags
+        (`t` title, `a` artist, `l` album) gate the per-track fields, so the
+        `tags:aat` queue query sees title+artist while a bare status still
+        gets a title.
         """
         tracks = getattr(self, "tracks", ["Test Song"]) or ["Test Song"]
         if start == "-":
@@ -74,16 +78,53 @@ class FakeLMS:
                 idx = self.cur_index
         if not 0 <= idx < len(tracks):
             idx = self.cur_index if 0 <= self.cur_index < len(tracks) else 0
+        try:
+            count = max(1, int(count))
+        except (TypeError, ValueError):
+            count = 1
+        loop = []
+        for pos in range(idx, min(idx + count, len(tracks))):
+            item = {"id": 100 + pos, "duration": 200, "coverid": "cover42"}
+            if not tags or "t" in tags:
+                item["title"] = tracks[pos]
+            if not tags or "a" in tags:
+                item["artist"] = "Test Artist"
+            if not tags or "l" in tags:
+                item["album"] = "Test Album"
+            loop.append(item)
         return {
             "mode": self.mode,
             "power": 1 if self.mode != "stop" else 0,
             "time": 12,
             "mixer volume": self.volume,
             "playlist_cur_index": str(self.cur_index),
-            "playlist_loop": [{"id": 99, "title": tracks[idx],
-                               "artist": "Test Artist", "album": "Test Album",
-                               "duration": 200, "coverid": "cover42"}],
+            "playlist_loop": loop,
         }
+
+    def _playlist_command(self, verb, arg):
+        """Apply `playlist index|delete <arg>` the way LMS would."""
+        if verb == "index":
+            try:
+                if str(arg).startswith(("+", "-")):
+                    self.cur_index += int(arg)
+                else:
+                    self.cur_index = int(arg)
+            except (TypeError, ValueError):
+                return
+            self.cur_index = max(0, min(len(self.tracks) - 1, self.cur_index))
+        elif verb == "delete":
+            try:
+                pos = int(arg)
+            except (TypeError, ValueError):
+                return
+            if 0 <= pos < len(self.tracks):
+                del self.tracks[pos]
+                if pos < self.cur_index:
+                    self.cur_index -= 1
+                if self.tracks:
+                    self.cur_index = max(0, min(len(self.tracks) - 1, self.cur_index))
+                else:
+                    self.cur_index = 0
 
     def jsonrpc(self, player, cli):
         self.commands.append((player, list(cli)))
@@ -94,7 +135,13 @@ class FakeLMS:
         if cmd == "players":
             return {"count": len(PLAYERS), "players_loop": PLAYERS}
         if cmd == "status":
-            return self._status_payload(cli[1] if len(cli) > 1 else "-")
+            start = cli[1] if len(cli) > 1 else "-"
+            count = cli[2] if len(cli) > 2 else 1
+            tags = ""
+            for part in cli[3:]:
+                if part.startswith("tags:"):
+                    tags = part[len("tags:"):]
+            return self._status_payload(start, count, tags)
         if cmd in ("albums", "artists", "playlists"):
             term = ""
             for part in cli[3:]:
@@ -117,6 +164,9 @@ class FakeLMS:
             self.mode = "play"
         elif cmd == "mixer":
             self.volume = int(cli[2])
+        elif cmd == "playlist":
+            self._playlist_command(cli[1] if len(cli) > 1 else "",
+                                   cli[2] if len(cli) > 2 else "")
         # Like the real LMS: a state-changing command triggers an async push.
         if cmd in ("pause", "play", "mixer", "playlist", "time", "power"):
             self.pending_pushes.append(self._status_payload())

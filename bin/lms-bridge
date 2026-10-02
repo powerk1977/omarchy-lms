@@ -11,11 +11,18 @@ mirroring bin/oh-bridge in openhab-omarchy:
   -> {"op":"discover"}
   -> {"op":"selectPlayer","player":"<id>"}
   -> {"op":"cmd","player":"<id>","cli":["pause","1"],"tag":"..."}
+  -> {"op":"search","q":"...","tag":"..."}
+  -> {"op":"queue","player":"<id>?","tag":"..."}
+  -> {"op":"queueJump","player":"<id>?","index":N,"tag":"..."}
+  -> {"op":"queueDelete","player":"<id>?","index":N,"tag":"..."}
   -> {"op":"shutdown"}
   <- {"ev":"phase","phase":"idle|connecting|connected|error","generation":N,
       "error":"...","errorKind":"auth|network"}
   <- {"ev":"players","items":[...],"generation":N}
   <- {"ev":"state","player":"<id>","nowplaying":{...},"seq":N,"generation":N}
+  <- {"ev":"queueResults","tag":"...","player":"<id>",
+      "items":[{"id":N,"title":"...","artist":"...","current":bool}],
+      "seq":N,"generation":N}
 
 `seq` is a monotonic per-process counter reserved at the moment a status
 snapshot is requested/first received. Consumers must drop any state whose
@@ -410,6 +417,9 @@ class Bridge:
             "selectPlayer": self._handle_select,
             "cmd": self._handle_cmd,
             "search": self._handle_search,
+            "queue": self._handle_queue,
+            "queueJump": self._handle_queue_jump,
+            "queueDelete": self._handle_queue_delete,
         }
         if op == "shutdown":
             self.emit({"ev": "exited", "reason": "shutdown"})
@@ -670,6 +680,67 @@ class Bridge:
         except HttpError as e:
             self._result(tag, False, str(e))
 
+    # -- queue --------------------------------------------------------------
+
+    def _handle_queue(self, msg):
+        """Panel queue: the playlist from index 0, with the current flagged.
+
+        Uses the same monotonic seq guard as state snapshots: the ticket is
+        reserved before the blocking query so a queue response that started
+        before a newer one can be dropped by the consumer.
+        """
+        tag = msg.get("tag", "")
+        player = msg.get("player") or self._active
+        seq = self._begin_state()
+        if self._demo:
+            self._emit_queue(player, [
+                {"id": 1, "title": "Demo Track", "artist": "Demo Artist",
+                 "current": True},
+            ], seq, tag)
+            self._result(tag, True)
+            return
+        if not self._http:
+            self._result(tag, False, "not connected")
+            return
+        try:
+            res = jsonrpc(self._http, player, ["status", "0", "50", "tags:aat"])
+            self._emit_queue(player, _queue_items(res), seq, tag)
+            self._result(tag, True)
+        except HttpError as e:
+            self._result(tag, False, str(e))
+
+    def _emit_queue(self, player, items, seq, tag):
+        self.emit({"ev": "queueResults", "tag": tag, "player": player,
+                   "items": items, "seq": seq, "generation": self._generation})
+
+    def _handle_queue_jump(self, msg):
+        self._playlist_index_op(msg, "index")
+
+    def _handle_queue_delete(self, msg):
+        self._playlist_index_op(msg, "delete")
+
+    def _playlist_index_op(self, msg, verb):
+        """Send `playlist <verb> <index>` (jump/delete) for a queue entry."""
+        tag = msg.get("tag", "")
+        player = msg.get("player") or self._active
+        index = msg.get("index")
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            self._result(tag, False, "invalid index")
+            return
+        if self._demo:
+            self._result(tag, True)
+            return
+        if not self._http:
+            self._result(tag, False, "not connected")
+            return
+        try:
+            jsonrpc(self._http, player, ["playlist", verb, str(index)])
+            self._result(tag, True)
+        except HttpError as e:
+            self._result(tag, False, str(e))
+
     # -- teardown -----------------------------------------------------------
 
     def _teardown(self):
@@ -682,6 +753,24 @@ class Bridge:
                 self._cover = None
             self._http = None
             self._phase = "idle"
+
+
+def _queue_items(res):
+    """Normalize an LMS `status 0 N tags:aat` result into queue entries.
+
+    The query starts at playlist index 0, so a loop position maps 1:1 to a
+    playlist index and matches `playlist_cur_index` (the currently playing
+    track)."""
+    if not isinstance(res, dict):
+        return []
+    loop = res.get("playlist_loop") or []
+    cur = _coerce_int(res.get("playlist_cur_index", -1), -1)
+    return [{
+        "id": t.get("id"),
+        "title": t.get("title", ""),
+        "artist": t.get("artist", ""),
+        "current": i == cur,
+    } for i, t in enumerate(loop)]
 
 
 def _nowplaying(res, pid):

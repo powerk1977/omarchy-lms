@@ -31,6 +31,8 @@ Panel {
   readonly property string glyphNote: "󰝚"    // md-music (cover placeholder)
   readonly property string glyphMusic: "󰐉"   // md-music-note (idle state)
   readonly property string glyphGear: "󰒓"    // md-cog
+  readonly property string glyphQueue: "󰲸"   // md-playlist-music (queue toggle)
+  readonly property string glyphClose: "󰅖"   // md-close (remove from queue)
   readonly property string glyphVolHi: "󰕾"   // md-volume-high
   readonly property string glyphVolOff: "󰖁"  // md-volume-off
   readonly property bool controlsActive: serviceReady && lms.connected
@@ -77,14 +79,82 @@ Panel {
   }
   readonly property bool searchBusy: searchHit === null && searchText !== ""
 
+  // ---- queue mode ----
+  // Body swap, mutually exclusive with search mode. The Service owns the
+  // queue projection; Panel just renders it and forwards index-based actions.
+  property bool queueMode: false
+  // Keyboard-driven queue selection (arrow keys + Enter). The Service
+  // re-fetches the queue on playback pushes, so the list changes underneath
+  // the cursor often; keep the selection put and just clamp it when the
+  // queue shrinks (rather than resetting to the top mid-navigation).
+  property int queueIndex: 0
+  readonly property var queue: {
+    if (!serviceReady) return []
+    var q = lms.queue
+    return q ? q : []
+  }
+  readonly property int queueRevision: {
+    if (!serviceReady || lms.queueRevision === undefined) return 0
+    return lms.queueRevision
+  }
+  onQueueRevisionChanged: {
+    if (queueIndex >= queue.length)
+      queueIndex = Math.max(0, queue.length - 1)
+  }
+  // Keep the keyboard-selected queue entry visible in the panel's scroll area.
+  onQueueIndexChanged: {
+    if (!opened || !queueMode) return
+    var row = queueRepeater.itemAt(queueIndex)
+    if (!row) return
+    var y = row.mapToItem(scroll, 0, 0).y
+    if (y < 0) scroll.contentY += y
+    else if (y + row.height > scroll.height) scroll.contentY += y + row.height - scroll.height
+  }
+
+  function enterQueue() {
+    if (!serviceReady || !lms.configured) return
+    if (searchMode) exitSearch()
+    queueMode = true
+    queueIndex = 0
+    buttonIndex = -1
+    if (typeof lms.fetchQueue === "function") lms.fetchQueue()
+    Qt.callLater(function() { if (root.queueMode) keyCatcher.forceActiveFocus() })
+  }
+  function exitQueue() {
+    queueMode = false
+    queueIndex = 0
+    buttonIndex = -1
+    Qt.callLater(function() { if (!root.queueMode) keyCatcher.forceActiveFocus() })
+  }
+  function moveQueueSelection(delta) {
+    var n = queue.length
+    if (n === 0) return
+    queueIndex = (queueIndex + delta + n) % n
+  }
+  function activateQueueSelection() {
+    if (queue.length === 0) return
+    jumpToQueue(queueIndex)
+  }
+  // Playlist index jump / delete. Wrapped so a divergent Service naming only
+  // needs changing here; the typeof guards keep the panel inert until the
+  // Service exposes them.
+  function jumpToQueue(index) {
+    if (serviceReady && typeof lms.queueJump === "function")
+      lms.queueJump(index)
+  }
+  function removeQueueEntry(index) {
+    if (serviceReady && typeof lms.queueDelete === "function")
+      lms.queueDelete(index)
+  }
+
   // ---- keyboard button selection (main view) ----
   // -1 = nothing selected. Arrows cycle the panel's actionable buttons in
-  // visual order (hero search/settings, then transport prev/play/next);
+  // visual order (hero search/queue/settings, then transport prev/play/next);
   // Enter activates the selection, or toggles play/pause when none is set.
   property int buttonIndex: -1
-  readonly property bool transportVisible: !searchMode && serviceReady
+  readonly property bool transportVisible: !searchMode && !queueMode && serviceReady
     && lms.configured && lms.players.length > 0
-  readonly property int buttonCount: 2 + (transportVisible ? 3 : 0)
+  readonly property int buttonCount: 3 + (transportVisible ? 3 : 0)
   function cycleButton(delta) {
     var n = buttonCount
     if (n === 0) return
@@ -97,14 +167,16 @@ Panel {
       return
     }
     if (buttonIndex === 0) { searchMode ? exitSearch() : enterSearch(); return }
-    if (buttonIndex === 1) { openSettings(); return }
-    if (buttonIndex === 2) { if (controlsActive) lms.previous(); return }
-    if (buttonIndex === 3) { if (controlsActive) lms.togglePlay(); return }
-    if (buttonIndex === 4) { if (controlsActive) lms.next(); return }
+    if (buttonIndex === 1) { queueMode ? exitQueue() : enterQueue(); return }
+    if (buttonIndex === 2) { openSettings(); return }
+    if (buttonIndex === 3) { if (controlsActive) lms.previous(); return }
+    if (buttonIndex === 4) { if (controlsActive) lms.togglePlay(); return }
+    if (buttonIndex === 5) { if (controlsActive) lms.next(); return }
   }
 
   function enterSearch() {
     if (!serviceReady || !lms.configured) return
+    if (queueMode) exitQueue()
     searchMode = true
     buttonIndex = -1
     Qt.callLater(function() { if (root.searchMode) searchField.forceActiveFocus() })
@@ -159,6 +231,7 @@ Panel {
     if (!opened) {
       root.buttonIndex = -1
       if (root.searchMode) root.exitSearch()
+      if (root.queueMode) root.exitQueue()
     }
   }
 
@@ -298,16 +371,22 @@ Panel {
       anchors.fill: parent
       // Main view: arrows cycle the actionable buttons; Enter activates the
       // selection (or toggles play/pause when none is set). Search mode keeps
-      // arrows/Enter for its own result list via the field's handlers.
+      // arrows/Enter for its own result list via the field's handlers; queue
+      // mode routes both to the queue list.
       onMoveRequested: function(dx, dy) {
         if (root.searchMode) return
+        if (root.queueMode) { root.moveQueueSelection(dx !== 0 ? dx : dy); return }
         root.cycleButton(dx !== 0 ? dx : dy)
       }
-      onActivateRequested: if (!root.searchMode) root.activateButton()
+      onActivateRequested: {
+        if (root.queueMode) root.activateQueueSelection()
+        else if (!root.searchMode) root.activateButton()
+      }
       // Tab always escapes to the neighbouring panel, search mode included.
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onCloseRequested: {
         if (root.searchMode) root.exitSearch()
+        else if (root.queueMode) root.exitQueue()
         else root.close()
       }
       onTextKey: function(key) {
@@ -360,12 +439,25 @@ Panel {
                   }
                 }
                 PanelActionButton {
+                  iconText: root.glyphQueue
+                  fontFamily: root.family
+                  tooltipText: "Queue"
+                  foreground: root.queueMode ? Color.accent : Qt.darker(root.fg, 1.4)
+                  hasCursor: root.buttonIndex === 1
+                  hoverColor: root.buttonIndex === 1
+                    ? Color.accent : Qt.darker(root.fg, 1.4)
+                  onClicked: {
+                    root.buttonIndex = -1
+                    root.queueMode ? root.exitQueue() : root.enterQueue()
+                  }
+                }
+                PanelActionButton {
                   iconText: root.glyphGear
                   fontFamily: root.family
                   tooltipText: "Settings"
                   foreground: Qt.darker(root.fg, 1.4)
-                  hasCursor: root.buttonIndex === 1
-                  hoverColor: root.buttonIndex === 1
+                  hasCursor: root.buttonIndex === 2
+                  hoverColor: root.buttonIndex === 2
                     ? Color.accent : Qt.darker(root.fg, 1.4)
                   onClicked: {
                     root.buttonIndex = -1
@@ -595,17 +687,130 @@ Panel {
             }
           }
 
+          // ---- queue mode ----
+          // Body swap mirroring search: a flat list of queue entries. Click
+          // jumps to the track (playlist index jump); the ✕ removes it. The
+          // currently playing entry is accent-highlighted independently of the
+          // keyboard cursor fill.
+          Column {
+            id: queueCol
+            width: parent.width
+            spacing: Style.spacing.sm
+            visible: root.serviceReady && root.queueMode
+
+            PanelSectionHeader {
+              text: "Queue"
+              color: root.fg
+            }
+
+            Text {
+              width: parent.width
+              visible: root.queue.length === 0
+              text: "Queue is empty"
+              color: root.dim
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              width: parent.width
+              visible: root.queue.length > 0
+              text: "\u2191\u2193 select \u00B7 Enter plays \u00B7 \u2715 removes"
+              color: root.dim
+              opacity: 0.7
+              font.pixelSize: Style.font.caption
+            }
+
+            Repeater {
+              id: queueRepeater
+              model: root.queue
+
+              Rectangle {
+                id: queueRow
+                required property var modelData
+                required property int index
+                width: queueCol.width
+                height: queueInner.implicitHeight + Style.space(12)
+                radius: Style.cornerRadius
+                color: queueRow.index === root.queueIndex
+                  ? root.selectedFill
+                  : (queueRow.modelData.current
+                    ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06)
+                    : "transparent")
+
+                // Row click jumps to the track directly; declared first so the
+                // remove button on top keeps its own click.
+                MouseArea {
+                  anchors.fill: parent
+                  onClicked: {
+                    root.queueIndex = queueRow.index
+                    root.jumpToQueue(queueRow.index)
+                  }
+                }
+
+                Row {
+                  id: queueInner
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(6)
+                  anchors.rightMargin: Style.space(6)
+                  spacing: Style.spacing.sm
+
+                  Text {
+                    width: Style.space(36)
+                    height: Style.space(36)
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    text: queueRow.modelData.current ? root.glyphPlay : root.glyphNote
+                    color: queueRow.modelData.current ? Color.accent : root.dim
+                    font.family: root.family
+                    font.pixelSize: Style.space(18)
+                  }
+
+                  Column {
+                    width: parent.width - Style.space(36 + 44)
+                    spacing: 0
+                    Text {
+                      width: parent.width
+                      text: queueRow.modelData.title || "\u2014"
+                      color: queueRow.modelData.current ? Color.accent : root.fg
+                      font.bold: queueRow.modelData.current
+                      font.pixelSize: Style.font.body
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      width: parent.width
+                      visible: (queueRow.modelData.artist || "") !== ""
+                      text: queueRow.modelData.artist || ""
+                      color: root.dim
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                    }
+                  }
+
+                  PanelActionButton {
+                    iconText: root.glyphClose
+                    size: Style.space(30)
+                    fontFamily: root.family
+                    foreground: root.fg
+                    color: "transparent"
+                    hoverColor: root.bar ? root.bar.urgent : Color.urgent
+                    tooltipText: "Remove from queue"
+                    onClicked: root.removeQueueEntry(queueRow.index)
+                  }
+                }
+              }
+            }
+          }
+
           // ---- not configured / error ----
           Text {
             width: parent.width
-            visible: !root.searchMode && (!root.serviceReady || !root.lms.configured)
+            visible: !root.searchMode && !root.queueMode && (!root.serviceReady || !root.lms.configured)
             text: root.serviceReady ? "No Lyrion server configured" : "Service unavailable"
             color: root.fg
             wrapMode: Text.WordWrap
           }
           Text {
             width: parent.width
-            visible: !root.searchMode && root.phase === "error" && root.lms && root.lms.lastError !== ""
+            visible: !root.searchMode && !root.queueMode && root.phase === "error" && root.lms && root.lms.lastError !== ""
             text: root.lms ? root.lms.lastError : ""
             color: bar ? bar.urgent : Color.urgent
             wrapMode: Text.WordWrap
@@ -615,7 +820,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.spacing.sm
-            visible: !root.searchMode && root.serviceReady && root.lms.players.length > 0
+            visible: !root.searchMode && !root.queueMode && root.serviceReady && root.lms.players.length > 0
             PanelSectionHeader {
               text: "Players"
               color: root.fg
@@ -644,7 +849,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.spacing.md
-            visible: !root.searchMode && root.serviceReady && root.lms.configured
+            visible: !root.searchMode && !root.queueMode && root.serviceReady && root.lms.configured
             Text {
               text: (root.lms.nowplaying.volume || 0) === 0
                 ? root.glyphVolOff : root.glyphVolHi
@@ -675,7 +880,7 @@ Panel {
             radius: Style.cornerRadius
             color: "black"
             clip: true
-            visible: !root.searchMode && root.serviceReady && root.lms.configured
+            visible: !root.searchMode && !root.queueMode && root.serviceReady && root.lms.configured
             Image {
               id: coverImg
               anchors.fill: parent
@@ -701,7 +906,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.spacing.sm
-            visible: !root.searchMode && root.serviceReady && root.lms.configured
+            visible: !root.searchMode && !root.queueMode && root.serviceReady && root.lms.configured
               && (root.lms.nowplaying.duration || 0) > 0
             Text {
               text: root.mmss(progress.dragging ? progress.liveValue : root.elapsed)
@@ -736,7 +941,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.spacing.xs
-            visible: !root.searchMode && root.serviceReady && root.lms.configured
+            visible: !root.searchMode && !root.queueMode && root.serviceReady && root.lms.configured
             Text {
               width: parent.width
               text: root.lms.title || "—"
@@ -766,7 +971,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.spacing.lg
-            visible: !root.searchMode && root.serviceReady && root.lms.configured && root.lms.players.length > 0
+            visible: !root.searchMode && !root.queueMode && root.serviceReady && root.lms.configured && root.lms.players.length > 0
             PanelActionButton {
               iconText: root.glyphPrev            // previous
               size: Style.space(40)
@@ -775,8 +980,8 @@ Panel {
               foreground: root.fg
               color: "transparent"
               enabled: root.controlsActive
-              hasCursor: root.buttonIndex === 2
-              hoverColor: root.buttonIndex === 2 ? Color.accent : root.fg
+              hasCursor: root.buttonIndex === 3
+              hoverColor: root.buttonIndex === 3 ? Color.accent : root.fg
               onClicked: {
                 root.buttonIndex = -1
                 root.lms.previous()
@@ -790,8 +995,8 @@ Panel {
               foreground: root.fg
               color: "transparent"
               enabled: root.controlsActive
-              hasCursor: root.buttonIndex === 3
-              hoverColor: root.buttonIndex === 3 ? Color.accent : root.fg
+              hasCursor: root.buttonIndex === 4
+              hoverColor: root.buttonIndex === 4 ? Color.accent : root.fg
               onClicked: {
                 root.buttonIndex = -1
                 root.lms.togglePlay()
@@ -805,8 +1010,8 @@ Panel {
               foreground: root.fg
               color: "transparent"
               enabled: root.controlsActive
-              hasCursor: root.buttonIndex === 4
-              hoverColor: root.buttonIndex === 4 ? Color.accent : root.fg
+              hasCursor: root.buttonIndex === 5
+              hoverColor: root.buttonIndex === 5 ? Color.accent : root.fg
               onClicked: {
                 root.buttonIndex = -1
                 root.lms.next()

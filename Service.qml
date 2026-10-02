@@ -84,6 +84,12 @@ QtObject {
   property var searchResults: null
   property int searchRevision: 0
 
+  // Panel queue (playlist snapshot). queueResults carries the bridge-seq; the
+  // same guard as state drops a queue response that started before a newer one.
+  property var queue: []
+  property int queueRevision: 0
+  property int queueSeq: 0
+
   readonly property var activePlayer: {
     for (var i = 0; i < root.players.length; i++) {
       if (root.players[i].playerid === root.activePlayerId) return root.players[i]
@@ -244,6 +250,24 @@ QtObject {
     bridgeController.send({ op: "search", q: String(q || ""), tag: "search" })
   }
 
+  function fetchQueue() {
+    bridgeController.send({ op: "queue", player: root.activePlayerId, tag: "queue" })
+  }
+
+  function queueJump(index) {
+    bridgeController.send({
+      op: "queueJump", player: root.activePlayerId,
+      index: Number(index), tag: "queue"
+    })
+  }
+
+  function queueDelete(index) {
+    bridgeController.send({
+      op: "queueDelete", player: root.activePlayerId,
+      index: Number(index), tag: "queue"
+    })
+  }
+
   // ------------------------------------------------------------ bridge
 
   property BridgeController bridgeController: BridgeController {
@@ -252,6 +276,7 @@ QtObject {
       // A fresh/restarted bridge restarts its seq counter at 0; drop any
       // guard values from the previous process so its states are accepted.
       root.stateSeq = ({})
+      root.queueSeq = 0
       if (root.configured) root.pushConfig()
     }
     onLine: function(value) { root.handleEvent(value) }
@@ -303,6 +328,9 @@ QtObject {
         }
         root.nowplaying = ev.nowplaying || {}
         root.stateRevision += 1
+        // Playlist pushes travel the state path; refresh the queue so adds,
+        // deletes and track jumps made elsewhere show up here too.
+        root.fetchQueue()
       }
       break
     case "coverbase":
@@ -311,6 +339,13 @@ QtObject {
     case "searchResults":
       root.searchResults = ev
       root.searchRevision += 1
+      break
+    case "queueResults":
+      if (ev.player && ev.player !== root.activePlayerId) break
+      if (ev.seq !== undefined && ev.seq <= root.queueSeq) break
+      if (ev.seq !== undefined) root.queueSeq = ev.seq
+      root.queue = ev.items || []
+      root.queueRevision += 1
       break
     case "servers":
       root.serversFound = ev.items || []
