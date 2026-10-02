@@ -26,7 +26,11 @@ class FakeLMS:
         self.require_auth = require_auth  # (user, password) or None
         self.mode = "play"
         self.volume = 40
-        self.cur_index = 2
+        # Playlist titles by position and the currently playing position.
+        # `status - N` starts at cur_index; `status 0 N` starts at position 0
+        # (mirrors the real LMS CLI, so an offset bug is observable).
+        self.tracks = ["Test Song"]
+        self.cur_index = 0
         self.commands = []  # every (player, cli) the bridge sent
         self.connect_calls = 0
         self.cover_paths = []  # every cover-art request path the bridge proxied
@@ -54,15 +58,29 @@ class FakeLMS:
 
     # -- protocol -----------------------------------------------------------
 
-    def _status_payload(self):
-        """The status dict this fake reports for its current state."""
+    def _status_payload(self, start="-"):
+        """The status dict this fake reports for its current state.
+
+        Honours the LMS `status <start> ...` semantics: `-` starts at the
+        currently playing track, a numeric start at that playlist position.
+        """
+        tracks = getattr(self, "tracks", ["Test Song"]) or ["Test Song"]
+        if start == "-":
+            idx = self.cur_index
+        else:
+            try:
+                idx = int(start)
+            except (TypeError, ValueError):
+                idx = self.cur_index
+        if not 0 <= idx < len(tracks):
+            idx = self.cur_index if 0 <= self.cur_index < len(tracks) else 0
         return {
             "mode": self.mode,
             "power": 1 if self.mode != "stop" else 0,
             "time": 12,
             "mixer volume": self.volume,
             "playlist_cur_index": str(self.cur_index),
-            "playlist_loop": [{"id": 99, "title": "Test Song",
+            "playlist_loop": [{"id": 99, "title": tracks[idx],
                                "artist": "Test Artist", "album": "Test Album",
                                "duration": 200, "coverid": "cover42"}],
         }
@@ -76,7 +94,23 @@ class FakeLMS:
         if cmd == "players":
             return {"count": len(PLAYERS), "players_loop": PLAYERS}
         if cmd == "status":
-            return self._status_payload()
+            return self._status_payload(cli[1] if len(cli) > 1 else "-")
+        if cmd in ("albums", "artists", "playlists"):
+            term = ""
+            for part in cli[3:]:
+                if part.startswith("search:"):
+                    term = part[len("search:"):].lower()
+            if "the" not in term:
+                return {"count": 0, cmd + "_loop": []}
+            if cmd == "albums":
+                return {"count": 1, "albums_loop": [
+                    {"id": 656, "album": "The Wall", "artist": "Pink Floyd",
+                     "year": 1979, "artwork_track_id": "e4a46d1b"}]}
+            if cmd == "artists":
+                return {"count": 1, "artists_loop": [
+                    {"id": 812, "artist": "The Jam"}]}
+            return {"count": 1, "playlists_loop": [
+                {"id": 5, "playlist": "The Mixtape"}]}
         if cmd == "pause":
             self.mode = "pause" if str(cli[1]) == "1" else "play"
         elif cmd == "play":

@@ -73,6 +73,16 @@ QtObject {
   property var nowplaying: ({})
   property string coverBase: ""
   property int stateRevision: 0
+  // Highest state seq applied, per player id. The bridge reserves seq before
+  // each status request, so a poll that started before a newer push can
+  // return after it; dropping seq <= last keeps the newer snapshot.
+  property var stateSeq: ({})
+
+  // Panel search (albums/artists/playlists; tracks excluded — server hang).
+  // searchResults is the raw searchResults event; searchRevision ticks so
+  // Panel bindings re-evaluate even when the shape is unchanged.
+  property var searchResults: null
+  property int searchRevision: 0
 
   readonly property var activePlayer: {
     for (var i = 0; i < root.players.length; i++) {
@@ -230,11 +240,20 @@ QtObject {
   function setVolume(percent) { root.sendCmd(["mixer", "volume", Math.round(percent)], "volume") }
   function seek(sec) { root.sendCmd(["time", Math.round(sec)], "transport") }
 
+  function search(q) {
+    bridgeController.send({ op: "search", q: String(q || ""), tag: "search" })
+  }
+
   // ------------------------------------------------------------ bridge
 
   property BridgeController bridgeController: BridgeController {
     executable: root.pluginDir + "/bin/lms-bridge"
-    onReady: if (root.configured) root.pushConfig()
+    onReady: {
+      // A fresh/restarted bridge restarts its seq counter at 0; drop any
+      // guard values from the previous process so its states are accepted.
+      root.stateSeq = ({})
+      if (root.configured) root.pushConfig()
+    }
     onLine: function(value) { root.handleEvent(value) }
     onStderrLine: function(line) {
       // Surface bridge tracebacks into lastError while not connected —
@@ -272,12 +291,26 @@ QtObject {
       break
     case "state":
       if (ev.player === root.activePlayerId) {
+        // Out-of-order guard: ignore a snapshot older than the one already
+        // applied for this player (see stateSeq). Missing seq is accepted
+        // for backward compatibility with an older bridge.
+        if (ev.seq !== undefined && ev.seq <= (root.stateSeq[ev.player] || 0))
+          break
+        if (ev.seq !== undefined) {
+          var seqs = root.stateSeq
+          seqs[ev.player] = ev.seq
+          root.stateSeq = seqs
+        }
         root.nowplaying = ev.nowplaying || {}
         root.stateRevision += 1
       }
       break
     case "coverbase":
       root.coverBase = ev.url || ""
+      break
+    case "searchResults":
+      root.searchResults = ev
+      root.searchRevision += 1
       break
     case "servers":
       root.serversFound = ev.items || []

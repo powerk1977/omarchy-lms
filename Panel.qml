@@ -58,6 +58,81 @@ Panel {
     return Math.floor(sec / 60) + ":" + (s < 10 ? "0" : "") + s
   }
 
+  // ---- search mode ----
+  property bool searchMode: false
+  property string searchText: ""
+  // Keyboard-driven result selection (arrow keys + Enter); reset on refresh.
+  property int selectedIndex: 0
+  readonly property var searchHit: serviceReady ? lms.searchResults : null
+  readonly property int searchRevision: serviceReady ? lms.searchRevision : 0
+  onSearchRevisionChanged: selectedIndex = 0
+  // Keep the keyboard-selected result visible in the panel's scroll area.
+  onSelectedIndexChanged: {
+    if (!opened || !searchMode) return
+    var row = resultsRepeater.itemAt(selectedIndex)
+    if (!row) return
+    var y = row.mapToItem(scroll, 0, 0).y
+    if (y < 0) scroll.contentY += y
+    else if (y + row.height > scroll.height) scroll.contentY += y + row.height - scroll.height
+  }
+  readonly property bool searchBusy: searchHit === null && searchText !== ""
+
+  // ---- keyboard button selection (main view) ----
+  // -1 = nothing selected. Arrows cycle the panel's actionable buttons in
+  // visual order (hero search/settings, then transport prev/play/next);
+  // Enter activates the selection, or toggles play/pause when none is set.
+  property int buttonIndex: -1
+  readonly property bool transportVisible: !searchMode && serviceReady
+    && lms.configured && lms.players.length > 0
+  readonly property int buttonCount: 2 + (transportVisible ? 3 : 0)
+  function cycleButton(delta) {
+    var n = buttonCount
+    if (n === 0) return
+    if (buttonIndex < 0) buttonIndex = delta > 0 ? 0 : n - 1
+    else buttonIndex = (buttonIndex + delta + n) % n
+  }
+  function activateButton() {
+    if (buttonIndex < 0) {
+      if (controlsActive) lms.togglePlay()
+      return
+    }
+    if (buttonIndex === 0) { searchMode ? exitSearch() : enterSearch(); return }
+    if (buttonIndex === 1) { openSettings(); return }
+    if (buttonIndex === 2) { if (controlsActive) lms.previous(); return }
+    if (buttonIndex === 3) { if (controlsActive) lms.togglePlay(); return }
+    if (buttonIndex === 4) { if (controlsActive) lms.next(); return }
+  }
+
+  function enterSearch() {
+    if (!serviceReady || !lms.configured) return
+    searchMode = true
+    buttonIndex = -1
+    Qt.callLater(function() { if (root.searchMode) searchField.forceActiveFocus() })
+  }
+  function exitSearch() {
+    searchMode = false
+    searchText = ""
+    buttonIndex = -1
+    if (serviceReady) lms.search("")
+    // Hand focus back to the key catcher: the hidden field must not keep
+    // active focus, or every later keypress (including "/") goes nowhere.
+    Qt.callLater(function() { if (!root.searchMode) keyCatcher.forceActiveFocus() })
+  }
+  function runSearch(q) {
+    if (serviceReady) lms.search(q)
+  }
+  // Play now: load the selection into the queue and start; then leave search
+  // mode so the panel shows the now-playing card that just started.
+  function playSelection(kind, id) {
+    if (!serviceReady) return
+    lms.sendCmd(["playlistcontrol", "cmd:load", kind + "_id:" + id], "search")
+    lms.sendCmd(["mode", "play"], "search")
+    exitSearch()
+  }
+  function enqueueSelection(kind, id) {
+    if (serviceReady) lms.sendCmd(["playlistcontrol", "cmd:add", kind + "_id:" + id], "search")
+  }
+
   Timer {
     interval: 1000
     repeat: true
@@ -77,9 +152,23 @@ Panel {
   readonly property color barIconColor: phase === "error"
     ? (bar ? bar.urgent : Color.urgent) : iconColor
 
-  onOpenedChanged: if (opened && root.serviceReady) root.lms.refresh()
+  onOpenedChanged: {
+    if (opened && root.serviceReady) root.lms.refresh()
+    // Leaving the panel resets any in-progress search so a fresh open
+    // starts on the now-playing view, not a stale query.
+    if (!opened) {
+      root.buttonIndex = -1
+      if (root.searchMode) root.exitSearch()
+    }
+  }
 
-  implicitWidth: button.implicitWidth
+  // Bar chrome: icon always; when the panel is closed and something is
+  // playing, a marquee of "title · artist" scrolls next to it.
+  readonly property bool showBarLabel: !opened && serviceReady && lms.playing
+    && (lms.title !== "" || lms.artist !== "") && !(bar && bar.vertical)
+  property real maxLabelWidth: 200
+
+  implicitWidth: barRow.implicitWidth
   implicitHeight: button.implicitHeight
 
   IpcHandler {
@@ -118,22 +207,80 @@ Panel {
     function settings(): void { root.openSettings() }
   }
 
-  BarIconButton {
-    id: button
-    anchors.fill: parent
-    bar: root.bar
-    iconComponent: Component {
+  Row {
+    id: barRow
+    anchors.centerIn: parent
+    spacing: Style.space(6)
+
+    BarIconButton {
+      id: button
+      bar: root.bar
+      iconComponent: Component {
+        Text {
+          anchors.centerIn: parent
+          text: root.lms && root.lms.playing ? root.glyphPlay : root.glyphMusic
+          color: root.barIconColor
+          font.family: root.family
+          font.pixelSize: Style.bar.iconCanvas * 0.8
+        }
+      }
+      foreground: root.barIconColor
+      active: root.phase === "error"
+      onPressed: root.toggle()
+    }
+
+    Item {
+      id: scrollClip
+      width: root.showBarLabel ? Math.min(root.maxLabelWidth, labelText.implicitWidth) : 0
+      height: button.implicitHeight
+      clip: true
+      visible: root.showBarLabel
+      anchors.verticalCenter: parent.verticalCenter
+
+      // Restart the marquee whenever the label text, its width, or the
+      // clip geometry/visibility changes. A declarative `running` binding
+      // left x parked at a stale negative offset when the text changed
+      // mid-flight (or when the panel opened/closed), so the label froze
+      // off-screen or stopped scrolling. Stop, reset to the resting
+      // position, then (re)start only when the text actually overflows.
+      function restartMarquee() {
+        marquee.stop()
+        labelText.x = 0
+        if (labelText.needsScroll && !root.opened && !(root.bar && root.bar.vertical))
+          marquee.restart()
+      }
+      onWidthChanged: restartMarquee()
+      onVisibleChanged: restartMarquee()
+
       Text {
-        anchors.centerIn: parent
-        text: root.lms && root.lms.playing ? root.glyphPlay : root.glyphMusic
+        id: labelText
+        x: 0
+        textFormat: Text.PlainText
+        text: (root.lms ? (root.lms.title || "") : "")
+          + (root.lms && root.lms.artist ? "  ·  " + root.lms.artist : "")
         color: root.barIconColor
         font.family: root.family
-        font.pixelSize: Style.bar.iconCanvas * 0.8
+        font.pixelSize: Style.font.body
+        anchors.verticalCenter: parent.verticalCenter
+
+        property bool needsScroll: implicitWidth > scrollClip.width
+        onImplicitWidthChanged: scrollClip.restartMarquee()
+        onTextChanged: scrollClip.restartMarquee()
+      }
+
+      NumberAnimation {
+        id: marquee
+        target: labelText
+        property: "x"
+        running: false
+        loops: Animation.Infinite
+        duration: Math.max(6000, labelText.implicitWidth * 25)
+        from: scrollClip.width
+        to: -labelText.implicitWidth
+        easing.type: Easing.Linear
+        onStopped: labelText.x = 0
       }
     }
-    foreground: root.barIconColor
-    active: root.phase === "error"
-    onPressed: root.toggle()
   }
 
   KeyboardPanel {
@@ -149,12 +296,27 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
+      // Main view: arrows cycle the actionable buttons; Enter activates the
+      // selection (or toggles play/pause when none is set). Search mode keeps
+      // arrows/Enter for its own result list via the field's handlers.
+      onMoveRequested: function(dx, dy) {
+        if (root.searchMode) return
+        root.cycleButton(dx !== 0 ? dx : dy)
+      }
+      onActivateRequested: if (!root.searchMode) root.activateButton()
+      // Tab always escapes to the neighbouring panel, search mode included.
+      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onCloseRequested: {
+        if (root.searchMode) root.exitSearch()
+        else root.close()
+      }
       onTextKey: function(key) {
-        if (String(key).toLowerCase() === "s") root.openSettings()
+        if (String(key) === "/") root.enterSearch()
+        else if (String(key).toLowerCase() === "s") root.openSettings()
       }
 
       Flickable {
+        id: scroll
         anchors.fill: parent
         contentWidth: width
         contentHeight: content.implicitHeight
@@ -185,11 +347,249 @@ Panel {
               Row {
                 spacing: Style.spacing.xs
                 PanelActionButton {
+                  iconText: "󰍉"    // md-magnify 
+                  fontFamily: root.family
+                  tooltipText: "Search (/)"
+                  foreground: root.searchMode ? Color.accent : Qt.darker(root.fg, 1.4)
+                  hasCursor: root.buttonIndex === 0
+                  hoverColor: root.buttonIndex === 0
+                    ? Color.accent : Qt.darker(root.fg, 1.4)
+                  onClicked: {
+                    root.buttonIndex = -1
+                    root.searchMode ? root.exitSearch() : root.enterSearch()
+                  }
+                }
+                PanelActionButton {
                   iconText: root.glyphGear
                   fontFamily: root.family
                   tooltipText: "Settings"
                   foreground: Qt.darker(root.fg, 1.4)
-                  onClicked: root.openSettings()
+                  hasCursor: root.buttonIndex === 1
+                  hoverColor: root.buttonIndex === 1
+                    ? Color.accent : Qt.darker(root.fg, 1.4)
+                  onClicked: {
+                    root.buttonIndex = -1
+                    root.openSettings()
+                  }
+                }
+              }
+            }
+          }
+
+          // ---- search mode ----
+          Column {
+            id: searchCol
+            width: parent.width
+            spacing: Style.spacing.sm
+            visible: root.serviceReady && root.searchMode
+
+            TextField {
+              id: searchField
+              width: parent.width
+              placeholderText: "Search albums, artists, playlists"
+              color: root.fg
+              font.family: root.family
+              font.pixelSize: Style.font.body
+              onTextChanged: {
+                root.searchText = text
+                searchDebounce.restart()
+              }
+              // Enter plays the selected result; with nothing selected yet it
+              // forces the search (covers the no-results-yet case).
+              onAccepted: searchCol.playSelectedOrSearch()
+              Keys.onDownPressed: searchCol.moveSelection(1)
+              Keys.onUpPressed: searchCol.moveSelection(-1)
+              Keys.onEscapePressed: root.exitSearch()
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                  event.accepted = true
+                  root.switchPanel(event.key === Qt.Key_Backtab ? -1 : 1)
+                  return
+                }
+                if (event.key === Qt.Key_Slash && !event.text) return
+                if (event.key === Qt.Key_Slash) {
+                  event.accepted = true
+                  root.exitSearch()
+                }
+              }
+            }
+            Timer {
+              id: searchDebounce
+              interval: 250
+              onTriggered: root.runSearch(root.searchText)
+            }
+
+            // Results echo the query; ignore stale responses.
+            readonly property var hits: root.searchHit && root.searchHit.q === root.searchText
+              ? root.searchHit : null
+            // Flat, display-ordered result list (albums, then artists, then
+            // playlists) so arrow-key selection is a single index over one model.
+            readonly property var flatResults: {
+              if (!hits) return []
+              var out = []
+              var albums = hits.albums || [], artists = hits.artists || [],
+                  playlists = hits.playlists || []
+              for (var i = 0; i < albums.length; i++)
+                out.push({ kind: "album", id: albums[i].id, name: albums[i].name,
+                           artist: albums[i].artist, year: albums[i].year,
+                           coverId: albums[i].coverId })
+              for (var j = 0; j < artists.length; j++)
+                out.push({ kind: "artist", id: artists[j].id, name: artists[j].name })
+              for (var k = 0; k < playlists.length; k++)
+                out.push({ kind: "playlist", id: playlists[k].id, name: playlists[k].name })
+              return out
+            }
+            readonly property bool anyHits: flatResults.length > 0
+
+            function moveSelection(delta) {
+              var n = flatResults.length
+              if (n === 0) return
+              root.selectedIndex = (root.selectedIndex + delta + n) % n
+            }
+            function playSelectedOrSearch() {
+              if (flatResults.length === 0) {
+                searchDebounce.stop()
+                root.runSearch(root.searchText)
+                return
+              }
+              var hit = flatResults[root.selectedIndex]
+              root.playSelection(hit.kind, hit.id)
+            }
+
+            Text {
+              width: parent.width
+              visible: root.searchText !== "" && !searchCol.anyHits
+              text: "No matches"
+              color: root.dim
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              width: parent.width
+              visible: searchCol.anyHits
+              text: "\u2191\u2193 select \u00B7 Enter plays now \u00B7 + adds to queue"
+              color: root.dim
+              opacity: 0.7
+              font.pixelSize: Style.font.caption
+            }
+
+            Repeater {
+              id: resultsRepeater
+              model: searchCol.flatResults
+
+              Rectangle {
+                id: resultRow
+                required property var modelData
+                required property int index
+                width: searchCol.width
+                height: resultInner.implicitHeight + Style.space(12)
+                radius: Style.cornerRadius
+                color: resultRow.index === root.selectedIndex
+                  ? root.selectedFill : "transparent"
+
+                // Row click plays directly; declared first so the play/add
+                // buttons on top keep their own clicks.
+                MouseArea {
+                  anchors.fill: parent
+                  onClicked: {
+                    root.selectedIndex = resultRow.index
+                    root.playSelection(resultRow.modelData.kind, resultRow.modelData.id)
+                  }
+                }
+
+                Row {
+                  id: resultInner
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(6)
+                  anchors.rightMargin: Style.space(6)
+                  spacing: Style.spacing.sm
+
+                  Rectangle {
+                    width: Style.space(36)
+                    height: Style.space(36)
+                    radius: Style.cornerRadius
+                    color: "black"
+                    clip: true
+                    visible: resultRow.modelData.kind === "album"
+                    Image {
+                      anchors.fill: parent
+                      source: root.lms.coverBase !== "" && resultRow.modelData.coverId
+                        ? root.lms.coverBase + "/cover/" + resultRow.modelData.coverId + ".jpg" : ""
+                      fillMode: Image.PreserveAspectCrop
+                      asynchronous: true
+                      visible: status === Image.Ready
+                    }
+                    Text {
+                      anchors.centerIn: parent
+                      visible: resultRow.modelData.coverId === ""
+                      text: root.glyphNote
+                      color: root.dim
+                      font.family: root.family
+                      font.pixelSize: Style.space(18)
+                    }
+                  }
+                  Text {
+                    width: Style.space(36)
+                    height: Style.space(36)
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    visible: resultRow.modelData.kind === "artist"
+                    text: root.glyphNote
+                    color: root.dim
+                    font.family: root.family
+                    font.pixelSize: Style.space(18)
+                  }
+                  Text {
+                    width: Style.space(36)
+                    height: Style.space(36)
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    visible: resultRow.modelData.kind === "playlist"
+                    text: "󰎆"    // md-playlist-play
+                    color: root.dim
+                    font.family: root.family
+                    font.pixelSize: Style.space(18)
+                  }
+
+                  Column {
+                    width: parent.width - Style.space(36 + 84)
+                    spacing: 0
+                    Text {
+                      width: parent.width
+                      text: resultRow.modelData.name || "\u2014"
+                      color: root.fg
+                      font.bold: resultRow.modelData.kind === "album"
+                      font.pixelSize: Style.font.body
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      width: parent.width
+                      visible: resultRow.modelData.kind === "album"
+                      text: (resultRow.modelData.artist || "") + (resultRow.modelData.year ? " \u00B7 " + resultRow.modelData.year : "")
+                      color: root.dim
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                    }
+                  }
+
+                  PanelActionButton {
+                    iconText: root.glyphPlay
+                    size: Style.space(30)
+                    fontFamily: root.family
+                    foreground: root.fg
+                    color: "transparent"
+                    tooltipText: "Play now"
+                    onClicked: root.playSelection(resultRow.modelData.kind, resultRow.modelData.id)
+                  }
+                  PanelActionButton {
+                    visible: resultRow.modelData.kind === "album"
+                    iconText: "󰐕"    // md-plus
+                    size: Style.space(30)
+                    fontFamily: root.family
+                    foreground: root.fg
+                    color: "transparent"
+                    tooltipText: "Add to queue"
+                    onClicked: root.enqueueSelection(resultRow.modelData.kind, resultRow.modelData.id)
+                  }
                 }
               }
             }
@@ -198,14 +598,14 @@ Panel {
           // ---- not configured / error ----
           Text {
             width: parent.width
-            visible: !root.serviceReady || !root.lms.configured
+            visible: !root.searchMode && (!root.serviceReady || !root.lms.configured)
             text: root.serviceReady ? "No Lyrion server configured" : "Service unavailable"
             color: root.fg
             wrapMode: Text.WordWrap
           }
           Text {
             width: parent.width
-            visible: root.phase === "error" && root.lms && root.lms.lastError !== ""
+            visible: !root.searchMode && root.phase === "error" && root.lms && root.lms.lastError !== ""
             text: root.lms ? root.lms.lastError : ""
             color: bar ? bar.urgent : Color.urgent
             wrapMode: Text.WordWrap
@@ -215,7 +615,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.spacing.sm
-            visible: root.serviceReady && root.lms.players.length > 0
+            visible: !root.searchMode && root.serviceReady && root.lms.players.length > 0
             PanelSectionHeader {
               text: "Players"
               color: root.fg
@@ -244,7 +644,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.spacing.md
-            visible: root.serviceReady && root.lms.configured
+            visible: !root.searchMode && root.serviceReady && root.lms.configured
             Text {
               text: (root.lms.nowplaying.volume || 0) === 0
                 ? root.glyphVolOff : root.glyphVolHi
@@ -275,7 +675,7 @@ Panel {
             radius: Style.cornerRadius
             color: "black"
             clip: true
-            visible: root.serviceReady && root.lms.configured
+            visible: !root.searchMode && root.serviceReady && root.lms.configured
             Image {
               id: coverImg
               anchors.fill: parent
@@ -301,7 +701,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.spacing.sm
-            visible: root.serviceReady && root.lms.configured
+            visible: !root.searchMode && root.serviceReady && root.lms.configured
               && (root.lms.nowplaying.duration || 0) > 0
             Text {
               text: root.mmss(progress.dragging ? progress.liveValue : root.elapsed)
@@ -336,7 +736,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.spacing.xs
-            visible: root.serviceReady && root.lms.configured
+            visible: !root.searchMode && root.serviceReady && root.lms.configured
             Text {
               width: parent.width
               text: root.lms.title || "—"
@@ -366,7 +766,7 @@ Panel {
           Row {
             width: parent.width
             spacing: Style.spacing.lg
-            visible: root.serviceReady && root.lms.configured && root.lms.players.length > 0
+            visible: !root.searchMode && root.serviceReady && root.lms.configured && root.lms.players.length > 0
             PanelActionButton {
               iconText: root.glyphPrev            // previous
               size: Style.space(40)
@@ -375,7 +775,12 @@ Panel {
               foreground: root.fg
               color: "transparent"
               enabled: root.controlsActive
-              onClicked: root.lms.previous()
+              hasCursor: root.buttonIndex === 2
+              hoverColor: root.buttonIndex === 2 ? Color.accent : root.fg
+              onClicked: {
+                root.buttonIndex = -1
+                root.lms.previous()
+              }
             }
             PanelActionButton {
               iconText: root.lms.playing ? root.glyphPause : root.glyphPlay
@@ -385,7 +790,12 @@ Panel {
               foreground: root.fg
               color: "transparent"
               enabled: root.controlsActive
-              onClicked: root.lms.togglePlay()
+              hasCursor: root.buttonIndex === 3
+              hoverColor: root.buttonIndex === 3 ? Color.accent : root.fg
+              onClicked: {
+                root.buttonIndex = -1
+                root.lms.togglePlay()
+              }
             }
             PanelActionButton {
               iconText: root.glyphNext            // next
@@ -395,7 +805,12 @@ Panel {
               foreground: root.fg
               color: "transparent"
               enabled: root.controlsActive
-              onClicked: root.lms.next()
+              hasCursor: root.buttonIndex === 4
+              hoverColor: root.buttonIndex === 4 ? Color.accent : root.fg
+              onClicked: {
+                root.buttonIndex = -1
+                root.lms.next()
+              }
             }
           }
         }
