@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Ui
@@ -33,6 +34,9 @@ Panel {
   readonly property string glyphGear: "󰒓"    // md-cog
   readonly property string glyphQueue: "󰎆"   // md-playlist-play (queue toggle)
   readonly property string glyphClose: "󰅖"   // md-close (remove from queue)
+  readonly property string glyphShuffle: "󰒝"   // md-shuffle (playmode on)
+  readonly property string glyphSequence: "󰒞"  // md-shuffle-disabled (playmode off)
+  readonly property string glyphClear: "󰗩"     // md-delete-sweep (clear queue)
   readonly property string glyphVolHi: "󰕾"   // md-volume-high
   readonly property string glyphVolOff: "󰖁"  // md-volume-off
   readonly property bool controlsActive: serviceReady && lms.connected
@@ -88,6 +92,14 @@ Panel {
   // the cursor often; keep the selection put and just clamp it when the
   // queue shrinks (rather than resetting to the top mid-navigation).
   property int queueIndex: 0
+  // Header action cursor: -1 = the list has the cursor, 0 = playmode toggle,
+  // 1 = clear-all. Left/Right cycles these while Up/Down walks the list.
+  property int queueButtonIndex: -1
+  // Clear-all is only cycled to when there's something to clear.
+  readonly property int queueButtonCount: root.queue.length > 0 ? 2 : 1
+  // Clear-all is destructive, so it goes through a confirm dialog.
+  property bool clearConfirmOpen: false
+
   readonly property var queue: {
     if (!serviceReady) return []
     var q = lms.queue
@@ -101,14 +113,43 @@ Panel {
     if (queueIndex >= queue.length)
       queueIndex = Math.max(0, queue.length - 1)
   }
-  // Keep the keyboard-selected queue entry visible in the panel's scroll area.
-  onQueueIndexChanged: {
-    if (!opened || !queueMode) return
-    var row = queueRepeater.itemAt(queueIndex)
-    if (!row) return
-    var y = row.mapToItem(scroll, 0, 0).y
-    if (y < 0) scroll.contentY += y
-    else if (y + row.height > scroll.height) scroll.contentY += y + row.height - scroll.height
+
+  // Playmode: Service exposes `playmode` (0 sequential, 1 shuffle songs,
+  // 2 shuffle albums) plus `playmodeRevision`. Any non-zero mode counts as
+  // shuffle-on for the toggle; toggling off returns to sequential.
+  readonly property int playmode: {
+    if (!serviceReady) return 0
+    var rev = lms.playmodeRevision
+    var v = lms.playmode
+    return (v === undefined || v === null) ? 0 : v
+  }
+  readonly property bool shuffleOn: root.playmode !== 0
+  // Passive indicator state for the main panel. typeof-guarded so it stays
+  // false if the Service lane hasn't exposed `playmode` yet.
+  readonly property bool shuffleIndicatorOn: serviceReady
+    && typeof lms.playmode !== "undefined" && Number(lms.playmode) !== 0
+
+  // Height of the normal (non-queue) body below the hero. Captured while the
+  // normal view is on screen and frozen once queue/search mode takes over, so
+  // the queue list caps itself to the same footprint. Without the freeze the
+  // binding would cycle: the list height feeds content.implicitHeight, which
+  // would feed the measurement straight back into the list.
+  property real normalBodyHeight: 0
+  Binding {
+    target: root
+    property: "normalBodyHeight"
+    value: Math.max(0, content.implicitHeight - hero.height - content.spacing)
+    when: root.opened && !root.searchMode && !root.queueMode
+    restoreMode: Binding.RestoreNone
+  }
+  // List cap = normal body height minus the queue header/hint, so the whole
+  // queue panel stays within the normal panel's footprint; overflow scrolls
+  // inside the list.
+  readonly property real queueListMaxHeight: {
+    var body = root.normalBodyHeight > 0 ? root.normalBodyHeight : Style.space(520)
+    var chrome = queueHeader.implicitHeight + queueHint.implicitHeight
+      + queueCol.spacing * 2
+    return Math.max(Style.space(120), body - chrome)
   }
 
   function enterQueue() {
@@ -116,14 +157,18 @@ Panel {
     if (searchMode) exitSearch()
     queueMode = true
     queueIndex = 0
+    queueButtonIndex = -1
     buttonIndex = -1
     if (typeof lms.fetchQueue === "function") lms.fetchQueue()
+    if (typeof lms.fetchPlaymode === "function") lms.fetchPlaymode()
     Qt.callLater(function() { if (root.queueMode) keyCatcher.forceActiveFocus() })
   }
   function exitQueue() {
     queueMode = false
     queueIndex = 0
+    queueButtonIndex = -1
     buttonIndex = -1
+    clearConfirmOpen = false
     Qt.callLater(function() { if (!root.queueMode) keyCatcher.forceActiveFocus() })
   }
   function moveQueueSelection(delta) {
@@ -131,7 +176,15 @@ Panel {
     if (n === 0) return
     queueIndex = (queueIndex + delta + n) % n
   }
+  function cycleQueueButton(delta) {
+    var n = root.queueButtonCount
+    if (n === 0) return
+    if (root.queueButtonIndex < 0) root.queueButtonIndex = delta > 0 ? 0 : n - 1
+    else root.queueButtonIndex = (root.queueButtonIndex + delta + n) % n
+  }
   function activateQueueSelection() {
+    if (root.queueButtonIndex === 0) { root.togglePlaymode(); return }
+    if (root.queueButtonIndex === 1) { root.openClearConfirm(); return }
     if (queue.length === 0) return
     jumpToQueue(queueIndex)
   }
@@ -145,6 +198,25 @@ Panel {
   function removeQueueEntry(index) {
     if (serviceReady && typeof lms.queueDelete === "function")
       lms.queueDelete(index)
+  }
+  function togglePlaymode() {
+    if (serviceReady && typeof lms.setPlaymode === "function")
+      lms.setPlaymode(root.shuffleOn ? 0 : 1)
+  }
+  function openClearConfirm() {
+    if (queue.length === 0) return
+    queueButtonIndex = -1
+    clearConfirmOpen = true
+    Qt.callLater(function() { if (root.clearConfirmOpen) confirmLayer.forceActiveFocus() })
+  }
+  function closeClearConfirm() {
+    clearConfirmOpen = false
+    Qt.callLater(function() { if (root.queueMode) keyCatcher.forceActiveFocus() })
+  }
+  function confirmClearQueue() {
+    clearConfirmOpen = false
+    if (serviceReady && typeof lms.clearQueue === "function") lms.clearQueue()
+    Qt.callLater(function() { if (root.queueMode) keyCatcher.forceActiveFocus() })
   }
 
   // ---- keyboard button selection (main view) ----
@@ -230,6 +302,7 @@ Panel {
     // starts on the now-playing view, not a stale query.
     if (!opened) {
       root.buttonIndex = -1
+      root.clearConfirmOpen = false
       if (root.searchMode) root.exitSearch()
       if (root.queueMode) root.exitQueue()
     }
@@ -369,13 +442,20 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // The clear-all confirmation owns the keyboard while it's up.
+      blocked: root.clearConfirmOpen
       // Main view: arrows cycle the actionable buttons; Enter activates the
       // selection (or toggles play/pause when none is set). Search mode keeps
       // arrows/Enter for its own result list via the field's handlers; queue
-      // mode routes both to the queue list.
+      // mode routes Up/Down to the list and Left/Right to the header actions.
       onMoveRequested: function(dx, dy) {
         if (root.searchMode) return
-        if (root.queueMode) { root.moveQueueSelection(dx !== 0 ? dx : dy); return }
+        if (root.queueMode) {
+          if (dx !== 0) { root.cycleQueueButton(dx); return }
+          root.queueButtonIndex = -1
+          root.moveQueueSelection(dy)
+          return
+        }
         root.cycleButton(dx !== 0 ? dx : dy)
       }
       onActivateRequested: {
@@ -408,6 +488,7 @@ Panel {
           spacing: Style.spacing.md
 
           PanelHero {
+            id: hero
             width: parent.width
             title: "OmaLMS"
             meta: root.phase
@@ -689,18 +770,87 @@ Panel {
 
           // ---- queue mode ----
           // Body swap mirroring search: a flat list of queue entries. Click
-          // jumps to the track (playlist index jump); the ✕ removes it. The
-          // currently playing entry is accent-highlighted independently of the
-          // keyboard cursor fill.
+          // jumps to the track (playlist index jump); the per-row ✕ removes it.
+          // The currently playing entry is accent-highlighted independently of
+          // the keyboard cursor fill. The list is capped to the normal panel
+          // body height and scrolls internally, with the header carrying the
+          // playmode toggle and the (confirmed) clear-all.
           Column {
             id: queueCol
             width: parent.width
             spacing: Style.spacing.sm
             visible: root.serviceReady && root.queueMode
 
-            PanelSectionHeader {
-              text: "Queue"
-              color: root.fg
+            Item {
+              id: queueHeader
+              width: parent.width
+              implicitHeight: Math.max(queueHeaderLabel.implicitHeight, Style.space(30))
+
+              PanelSectionHeader {
+                id: queueHeaderLabel
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Queue" + (root.queue.length > 0
+                  ? " \u00B7 " + root.queue.length
+                    + (root.queue.length === 1 ? " track" : " tracks")
+                  : "")
+                color: root.fg
+              }
+
+              Row {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.spacing.xs
+
+                // Sequential / shuffle. Any shuffle mode is accent-filled so
+                // the current mode reads at a glance.
+                PanelActionButton {
+                  id: playmodeButton
+                  iconText: root.shuffleOn ? root.glyphShuffle : root.glyphSequence
+                  fontFamily: root.family
+                  tooltipText: root.playmode === 2 ? "Shuffle albums"
+                    : (root.playmode === 1 ? "Shuffle songs" : "Play in order")
+                  foreground: root.shuffleOn
+                    ? Color.accent : Qt.darker(root.fg, 1.4)
+                  hasCursor: root.queueMode && root.queueButtonIndex === 0
+                  hoverColor: root.queueButtonIndex === 0
+                    ? Color.accent : Qt.darker(root.fg, 1.4)
+                  onClicked: {
+                    root.queueButtonIndex = -1
+                    root.togglePlaymode()
+                  }
+                }
+
+                // Clear-all: destructive, so it keeps the urgent tint and is
+                // tucked in the header rather than beside the per-row ✕
+                // buttons. Disabled when there is nothing to clear.
+                PanelActionButton {
+                  id: clearButton
+                  iconText: root.glyphClear
+                  fontFamily: root.family
+                  tooltipText: "Clear queue"
+                  enabled: root.queue.length > 0
+                  foreground: root.queue.length > 0
+                    ? (root.bar ? root.bar.urgent : Color.urgent)
+                    : Qt.darker(root.fg, 2.0)
+                  hasCursor: root.queueMode && root.queueButtonIndex === 1
+                  hoverColor: root.bar ? root.bar.urgent : Color.urgent
+                  onClicked: {
+                    root.queueButtonIndex = -1
+                    root.openClearConfirm()
+                  }
+                }
+              }
+            }
+
+            Text {
+              id: queueHint
+              width: parent.width
+              visible: root.queue.length > 0
+              text: "\u2191\u2193 select \u00B7 Enter plays \u00B7 \u2190\u2192 actions \u00B7 \u2715 removes"
+              color: root.dim
+              opacity: 0.7
+              font.pixelSize: Style.font.caption
             }
 
             Text {
@@ -710,24 +860,29 @@ Panel {
               color: root.dim
               font.pixelSize: Style.font.body
             }
-            Text {
+
+            // Capped to the normal body height; the ScrollBar appears only
+            // when there are more rows than fit. positionViewAtIndex keeps the
+            // keyboard-selected row in view as Up/Down walk past the window.
+            ListView {
+              id: queueList
               width: parent.width
+              height: Math.min(contentHeight, root.queueListMaxHeight)
               visible: root.queue.length > 0
-              text: "\u2191\u2193 select \u00B7 Enter plays \u00B7 \u2715 removes"
-              color: root.dim
-              opacity: 0.7
-              font.pixelSize: Style.font.caption
-            }
-
-            Repeater {
-              id: queueRepeater
+              spacing: Style.spacing.xs
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              interactive: contentHeight > height
               model: root.queue
+              currentIndex: root.queueIndex
+              onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
+              ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-              Rectangle {
+              delegate: Rectangle {
                 id: queueRow
                 required property var modelData
                 required property int index
-                width: queueCol.width
+                width: queueList.width
                 height: queueInner.implicitHeight + Style.space(12)
                 radius: Style.cornerRadius
                 color: queueRow.index === root.queueIndex
@@ -741,6 +896,7 @@ Panel {
                 MouseArea {
                   anchors.fill: parent
                   onClicked: {
+                    root.queueButtonIndex = -1
                     root.queueIndex = queueRow.index
                     root.jumpToQueue(queueRow.index)
                   }
@@ -750,7 +906,10 @@ Panel {
                   id: queueInner
                   anchors.fill: parent
                   anchors.leftMargin: Style.space(6)
-                  anchors.rightMargin: Style.space(6)
+                  // Leave room for the scrollbar when it's showing so the
+                  // per-row ✕ never sits under it.
+                  anchors.rightMargin: queueList.contentHeight > queueList.height
+                    ? Style.space(14) : Style.space(6)
                   spacing: Style.spacing.sm
 
                   Text {
@@ -942,13 +1101,55 @@ Panel {
             width: parent.width
             spacing: Style.spacing.xs
             visible: !root.searchMode && !root.queueMode && root.serviceReady && root.lms.configured
-            Text {
+            // Title row reserves a slot on the right for the passive shuffle
+            // indicator, so showing/hiding it never shifts the title. The
+            // glyph is hover-only: no click, not part of the button cycle.
+            Item {
+              id: titleRow
               width: parent.width
-              text: root.lms.title || "—"
-              color: root.fg
-              elide: Text.ElideRight
-              font.bold: true
-              font.pixelSize: Style.font.body
+              height: titleText.implicitHeight
+
+              Text {
+                id: titleText
+                width: parent.width - shuffleMark.width
+                text: root.lms.title || "—"
+                color: root.fg
+                elide: Text.ElideRight
+                font.bold: true
+                font.pixelSize: Style.font.body
+              }
+
+              Item {
+                id: shuffleMark
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                // Glyph plus a small gap so elided titles don't butt up
+                // against the indicator.
+                width: shuffleGlyph.implicitWidth + Style.space(6)
+                height: shuffleGlyph.implicitHeight
+
+                Text {
+                  id: shuffleGlyph
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.glyphShuffle
+                  color: root.dim
+                  opacity: root.shuffleIndicatorOn ? 1 : 0
+                  font.family: root.family
+                  font.pixelSize: Style.font.caption
+                }
+
+                HoverHandler {
+                  id: shuffleHover
+                  enabled: root.shuffleIndicatorOn
+                }
+
+                PanelToolTip {
+                  visible: shuffleHover.hovered && root.shuffleIndicatorOn
+                  text: "Shuffle on"
+                  fontFamily: root.family
+                }
+              }
             }
             Text {
               width: parent.width
@@ -1018,6 +1219,35 @@ Panel {
               }
             }
           }
+        }
+      }
+
+      // Clear-all confirmation. Sits above the whole body; the key catcher is
+      // blocked while it's up, so this layer owns Escape / Left-Right / Enter.
+      Item {
+        id: confirmLayer
+        anchors.fill: parent
+        z: 50
+        visible: root.clearConfirmOpen
+        focus: root.clearConfirmOpen
+        Keys.onPressed: function(event) {
+          if (clearConfirm.handleKey(event)) event.accepted = true
+        }
+
+        ConfirmDialog {
+          id: clearConfirm
+          anchors.fill: parent
+          opened: root.clearConfirmOpen
+          message: "Clear the entire queue? This removes every track."
+          cancelText: "Cancel"
+          confirmText: "Clear"
+          // Default to Cancel so a stray Enter can't wipe the queue.
+          selectedIndex: 0
+          background: Color.popups.background
+          foreground: root.fg
+          fontFamily: root.family
+          onCanceled: root.closeClearConfirm()
+          onConfirmed: root.confirmClearQueue()
         }
       }
     }

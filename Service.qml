@@ -90,6 +90,12 @@ QtObject {
   property int queueRevision: 0
   property int queueSeq: 0
 
+  // Shuffle mode: 0 sequential, 1 shuffle songs, 2 shuffle albums. The bridge
+  // normalizes LMS's `playerpref shuffle` value; playmodeSeq guards snapshots.
+  property int playmode: 0
+  property int playmodeRevision: 0
+  property int playmodeSeq: 0
+
   readonly property var activePlayer: {
     for (var i = 0; i < root.players.length; i++) {
       if (root.players[i].playerid === root.activePlayerId) return root.players[i]
@@ -227,6 +233,7 @@ QtObject {
     root.playerId = root.activePlayerId
     root.saveConfig({ playerId: root.playerId })
     bridgeController.send({ op: "selectPlayer", player: root.activePlayerId })
+    root.fetchPlaymode()
   }
 
   function sendCmd(cli, tag) {
@@ -268,6 +275,35 @@ QtObject {
     })
   }
 
+  function clearQueue() {
+    bridgeController.send({ op: "queueClear", player: root.activePlayerId, tag: "queue" })
+  }
+
+  function fetchPlaymode() {
+    bridgeController.send({ op: "playmode", player: root.activePlayerId, tag: "playmode" })
+  }
+
+  // Optimistic: update the local value immediately, then let the bridge's
+  // seq-guarded playmode event reconcile it.
+  function setPlaymode(value) {
+    var n = Math.round(Number(value))
+    if (n !== 0 && n !== 1 && n !== 2) return
+    root.playmode = n
+    root.playmodeRevision += 1
+    bridgeController.send({
+      op: "playmodeSet", player: root.activePlayerId, value: n, tag: "playmode"
+    })
+  }
+
+  // Coalesces the CometD-driven playmode refresh so a burst of state pushes
+  // can't fire a playerpref query each. The queue surface also calls
+  // fetchPlaymode() explicitly on open; setPlaymode reconciles itself.
+  property Timer playmodeRefreshTimer: Timer {
+    interval: 5000
+    repeat: false
+    onTriggered: root.fetchPlaymode()
+  }
+
   // ------------------------------------------------------------ bridge
 
   property BridgeController bridgeController: BridgeController {
@@ -277,6 +313,7 @@ QtObject {
       // guard values from the previous process so its states are accepted.
       root.stateSeq = ({})
       root.queueSeq = 0
+      root.playmodeSeq = 0
       if (root.configured) root.pushConfig()
     }
     onLine: function(value) { root.handleEvent(value) }
@@ -331,6 +368,9 @@ QtObject {
         // Playlist pushes travel the state path; refresh the queue so adds,
         // deletes and track jumps made elsewhere show up here too.
         root.fetchQueue()
+        // Playmode changes are rarer than state pushes, so refresh on a
+        // debounce timer rather than one playerpref query per push.
+        if (!root.playmodeRefreshTimer.running) root.playmodeRefreshTimer.start()
       }
       break
     case "coverbase":
@@ -346,6 +386,13 @@ QtObject {
       if (ev.seq !== undefined) root.queueSeq = ev.seq
       root.queue = ev.items || []
       root.queueRevision += 1
+      break
+    case "playmode":
+      if (ev.player && ev.player !== root.activePlayerId) break
+      if (ev.seq !== undefined && ev.seq <= root.playmodeSeq) break
+      if (ev.seq !== undefined) root.playmodeSeq = ev.seq
+      root.playmode = ev.value
+      root.playmodeRevision += 1
       break
     case "servers":
       root.serversFound = ev.items || []
