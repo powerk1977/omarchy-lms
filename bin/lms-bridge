@@ -546,6 +546,15 @@ class Bridge:
 
     def _handle_select(self, msg):
         self._active = msg.get("player", "") or ""
+        # Push a fresh snapshot for the newly selected player right away,
+        # otherwise the panel keeps showing the previous player's
+        # now-playing until some unrelated push happens to arrive.
+        if self._active and not self._demo:
+            try:
+                self._poll_state(self._active)
+            except HttpError as e:
+                self._result(msg.get("tag", ""), False, str(e))
+                return
         self._result(msg.get("tag", ""), True)
 
     def _handle_cmd(self, msg):
