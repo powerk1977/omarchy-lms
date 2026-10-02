@@ -73,6 +73,10 @@ QtObject {
   property var nowplaying: ({})
   property string coverBase: ""
   property int stateRevision: 0
+  // Highest state seq applied, per player id. The bridge reserves seq before
+  // each status request, so a poll that started before a newer push can
+  // return after it; dropping seq <= last keeps the newer snapshot.
+  property var stateSeq: ({})
 
   // Panel search (albums/artists/playlists; tracks excluded — server hang).
   // searchResults is the raw searchResults event; searchRevision ticks so
@@ -244,7 +248,12 @@ QtObject {
 
   property BridgeController bridgeController: BridgeController {
     executable: root.pluginDir + "/bin/lms-bridge"
-    onReady: if (root.configured) root.pushConfig()
+    onReady: {
+      // A fresh/restarted bridge restarts its seq counter at 0; drop any
+      // guard values from the previous process so its states are accepted.
+      root.stateSeq = ({})
+      if (root.configured) root.pushConfig()
+    }
     onLine: function(value) { root.handleEvent(value) }
     onStderrLine: function(line) {
       // Surface bridge tracebacks into lastError while not connected —
@@ -282,6 +291,16 @@ QtObject {
       break
     case "state":
       if (ev.player === root.activePlayerId) {
+        // Out-of-order guard: ignore a snapshot older than the one already
+        // applied for this player (see stateSeq). Missing seq is accepted
+        // for backward compatibility with an older bridge.
+        if (ev.seq !== undefined && ev.seq <= (root.stateSeq[ev.player] || 0))
+          break
+        if (ev.seq !== undefined) {
+          var seqs = root.stateSeq
+          seqs[ev.player] = ev.seq
+          root.stateSeq = seqs
+        }
         root.nowplaying = ev.nowplaying || {}
         root.stateRevision += 1
       }

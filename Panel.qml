@@ -77,15 +77,46 @@ Panel {
   }
   readonly property bool searchBusy: searchHit === null && searchText !== ""
 
+  // ---- keyboard button selection (main view) ----
+  // -1 = nothing selected. Arrows cycle the panel's actionable buttons in
+  // visual order (hero search/settings, then transport prev/play/next);
+  // Enter activates the selection, or toggles play/pause when none is set.
+  property int buttonIndex: -1
+  readonly property bool transportVisible: !searchMode && serviceReady
+    && lms.configured && lms.players.length > 0
+  readonly property int buttonCount: 2 + (transportVisible ? 3 : 0)
+  function cycleButton(delta) {
+    var n = buttonCount
+    if (n === 0) return
+    if (buttonIndex < 0) buttonIndex = delta > 0 ? 0 : n - 1
+    else buttonIndex = (buttonIndex + delta + n) % n
+  }
+  function activateButton() {
+    if (buttonIndex < 0) {
+      if (controlsActive) lms.togglePlay()
+      return
+    }
+    if (buttonIndex === 0) { searchMode ? exitSearch() : enterSearch(); return }
+    if (buttonIndex === 1) { openSettings(); return }
+    if (buttonIndex === 2) { if (controlsActive) lms.previous(); return }
+    if (buttonIndex === 3) { if (controlsActive) lms.togglePlay(); return }
+    if (buttonIndex === 4) { if (controlsActive) lms.next(); return }
+  }
+
   function enterSearch() {
     if (!serviceReady || !lms.configured) return
     searchMode = true
+    buttonIndex = -1
     Qt.callLater(function() { if (root.searchMode) searchField.forceActiveFocus() })
   }
   function exitSearch() {
     searchMode = false
     searchText = ""
+    buttonIndex = -1
     if (serviceReady) lms.search("")
+    // Hand focus back to the key catcher: the hidden field must not keep
+    // active focus, or every later keypress (including "/") goes nowhere.
+    Qt.callLater(function() { if (!root.searchMode) keyCatcher.forceActiveFocus() })
   }
   function runSearch(q) {
     if (serviceReady) lms.search(q)
@@ -125,10 +156,19 @@ Panel {
     if (opened && root.serviceReady) root.lms.refresh()
     // Leaving the panel resets any in-progress search so a fresh open
     // starts on the now-playing view, not a stale query.
-    if (!opened && root.searchMode) root.exitSearch()
+    if (!opened) {
+      root.buttonIndex = -1
+      if (root.searchMode) root.exitSearch()
+    }
   }
 
-  implicitWidth: button.implicitWidth
+  // Bar chrome: icon always; when the panel is closed and something is
+  // playing, a marquee of "title · artist" scrolls next to it.
+  readonly property bool showBarLabel: !opened && serviceReady && lms.playing
+    && (lms.title !== "" || lms.artist !== "") && !(bar && bar.vertical)
+  property real maxLabelWidth: 200
+
+  implicitWidth: barRow.implicitWidth
   implicitHeight: button.implicitHeight
 
   IpcHandler {
@@ -167,22 +207,58 @@ Panel {
     function settings(): void { root.openSettings() }
   }
 
-  BarIconButton {
-    id: button
-    anchors.fill: parent
-    bar: root.bar
-    iconComponent: Component {
+  Row {
+    id: barRow
+    anchors.centerIn: parent
+    spacing: Style.space(6)
+
+    BarIconButton {
+      id: button
+      bar: root.bar
+      iconComponent: Component {
+        Text {
+          anchors.centerIn: parent
+          text: root.lms && root.lms.playing ? root.glyphPlay : root.glyphMusic
+          color: root.barIconColor
+          font.family: root.family
+          font.pixelSize: Style.bar.iconCanvas * 0.8
+        }
+      }
+      foreground: root.barIconColor
+      active: root.phase === "error"
+      onPressed: root.toggle()
+    }
+
+    Item {
+      id: scrollClip
+      width: root.showBarLabel ? Math.min(root.maxLabelWidth, labelText.implicitWidth) : 0
+      height: button.implicitHeight
+      clip: true
+      visible: root.showBarLabel
+      anchors.verticalCenter: parent.verticalCenter
+
       Text {
-        anchors.centerIn: parent
-        text: root.lms && root.lms.playing ? root.glyphPlay : root.glyphMusic
+        id: labelText
+        textFormat: Text.PlainText
+        text: (root.lms ? (root.lms.title || "") : "")
+          + (root.lms && root.lms.artist ? "  ·  " + root.lms.artist : "")
         color: root.barIconColor
         font.family: root.family
-        font.pixelSize: Style.bar.iconCanvas * 0.8
+        font.pixelSize: Style.font.body
+        anchors.verticalCenter: parent.verticalCenter
+
+        property bool needsScroll: implicitWidth > scrollClip.width
+
+        NumberAnimation on x {
+          running: labelText.needsScroll && !root.opened && !(root.bar && root.bar.vertical)
+          loops: Animation.Infinite
+          duration: Math.max(6000, labelText.implicitWidth * 25)
+          from: scrollClip.width
+          to: -labelText.implicitWidth
+          easing.type: Easing.Linear
+        }
       }
     }
-    foreground: root.barIconColor
-    active: root.phase === "error"
-    onPressed: root.toggle()
   }
 
   KeyboardPanel {
@@ -198,6 +274,16 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // Main view: arrows cycle the actionable buttons; Enter activates the
+      // selection (or toggles play/pause when none is set). Search mode keeps
+      // arrows/Enter for its own result list via the field's handlers.
+      onMoveRequested: function(dx, dy) {
+        if (root.searchMode) return
+        root.cycleButton(dx !== 0 ? dx : dy)
+      }
+      onActivateRequested: if (!root.searchMode) root.activateButton()
+      // Tab always escapes to the neighbouring panel, search mode included.
+      onTabRequested: function(direction) { root.switchPanel(direction) }
       onCloseRequested: {
         if (root.searchMode) root.exitSearch()
         else root.close()
@@ -208,6 +294,7 @@ Panel {
       }
 
       Flickable {
+        id: scroll
         anchors.fill: parent
         contentWidth: width
         contentHeight: content.implicitHeight
@@ -242,14 +329,26 @@ Panel {
                   fontFamily: root.family
                   tooltipText: "Search (/)"
                   foreground: root.searchMode ? Color.accent : Qt.darker(root.fg, 1.4)
-                  onClicked: root.searchMode ? root.exitSearch() : root.enterSearch()
+                  hasCursor: root.buttonIndex === 0
+                  hoverColor: root.buttonIndex === 0
+                    ? Color.accent : Qt.darker(root.fg, 1.4)
+                  onClicked: {
+                    root.buttonIndex = -1
+                    root.searchMode ? root.exitSearch() : root.enterSearch()
+                  }
                 }
                 PanelActionButton {
                   iconText: root.glyphGear
                   fontFamily: root.family
                   tooltipText: "Settings"
                   foreground: Qt.darker(root.fg, 1.4)
-                  onClicked: root.openSettings()
+                  hasCursor: root.buttonIndex === 1
+                  hoverColor: root.buttonIndex === 1
+                    ? Color.accent : Qt.darker(root.fg, 1.4)
+                  onClicked: {
+                    root.buttonIndex = -1
+                    root.openSettings()
+                  }
                 }
               }
             }
@@ -278,6 +377,19 @@ Panel {
               onAccepted: searchCol.playSelectedOrSearch()
               Keys.onDownPressed: searchCol.moveSelection(1)
               Keys.onUpPressed: searchCol.moveSelection(-1)
+              Keys.onEscapePressed: root.exitSearch()
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                  event.accepted = true
+                  root.switchPanel(event.key === Qt.Key_Backtab ? -1 : 1)
+                  return
+                }
+                if (event.key === Qt.Key_Slash && !event.text) return
+                if (event.key === Qt.Key_Slash) {
+                  event.accepted = true
+                  root.exitSearch()
+                }
+              }
             }
             Timer {
               id: searchDebounce
@@ -641,7 +753,12 @@ Panel {
               foreground: root.fg
               color: "transparent"
               enabled: root.controlsActive
-              onClicked: root.lms.previous()
+              hasCursor: root.buttonIndex === 2
+              hoverColor: root.buttonIndex === 2 ? Color.accent : root.fg
+              onClicked: {
+                root.buttonIndex = -1
+                root.lms.previous()
+              }
             }
             PanelActionButton {
               iconText: root.lms.playing ? root.glyphPause : root.glyphPlay
@@ -651,7 +768,12 @@ Panel {
               foreground: root.fg
               color: "transparent"
               enabled: root.controlsActive
-              onClicked: root.lms.togglePlay()
+              hasCursor: root.buttonIndex === 3
+              hoverColor: root.buttonIndex === 3 ? Color.accent : root.fg
+              onClicked: {
+                root.buttonIndex = -1
+                root.lms.togglePlay()
+              }
             }
             PanelActionButton {
               iconText: root.glyphNext            // next
@@ -661,7 +783,12 @@ Panel {
               foreground: root.fg
               color: "transparent"
               enabled: root.controlsActive
-              onClicked: root.lms.next()
+              hasCursor: root.buttonIndex === 4
+              hoverColor: root.buttonIndex === 4 ? Color.accent : root.fg
+              onClicked: {
+                root.buttonIndex = -1
+                root.lms.next()
+              }
             }
           }
         }

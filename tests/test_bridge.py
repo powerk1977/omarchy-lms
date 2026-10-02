@@ -23,6 +23,16 @@ BRIDGE = ROOT / "bin" / "lms-bridge"
 PID1 = "aa:bb:cc:dd:ee:01"
 
 
+def _load_bridge():
+    import importlib.machinery
+    import importlib.util
+    spec = importlib.util.spec_from_loader(
+        "lms_bridge", importlib.machinery.SourceFileLoader("lms_bridge", str(BRIDGE)))
+    lb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lb)
+    return lb
+
+
 class BridgeProc:
     def __init__(self, demo=False):
         cmd = [sys.executable, str(BRIDGE)] + (["--demo"] if demo else [])
@@ -117,6 +127,7 @@ def test_live_connect_command_and_cover():
                             and e["nowplaying"].get("title") == "Test Song")
         assert state["nowplaying"]["artist"] == "Test Artist", state
         assert state["nowplaying"]["mode"] == "play", state
+        assert isinstance(state.get("seq"), int) and state["seq"] > 0, state
 
         # The fake LMS pushes a status payload on the /slim/subscribe response
         # channel during the first long-poll; the bridge must parse it directly
@@ -201,12 +212,7 @@ def test_discovery_demo():
 
 
 def test_nowplaying_hardening():
-    import importlib.machinery
-    import importlib.util
-    spec = importlib.util.spec_from_loader(
-        "lms_bridge", importlib.machinery.SourceFileLoader("lms_bridge", str(BRIDGE)))
-    lb = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(lb)
+    lb = _load_bridge()
 
     assert lb._coerce_int(None) == 0
     assert lb._coerce_int("") == 0
@@ -297,6 +303,67 @@ def test_search_op():
     print("ok search op")
 
 
+def test_state_seq_guard():
+    """Regression: a stale status poll must not overwrite a newer push.
+
+    The bridge reserves a monotonic seq *before* the (blocking) status
+    request; a consumer (Service.qml) applies states in arrival order but
+    drops seq <= the last applied per player. A poll that started before a
+    track change can therefore return after the newer CometD push without
+    winning."""
+    lb = _load_bridge()
+    bridge = lb.Bridge()
+    bridge._players = [{"playerid": "p1"}]
+    bridge._http = True  # _on_push bails without a connection
+    emitted = []
+    emit_lock = threading.Lock()
+
+    def capture(obj):
+        with emit_lock:
+            emitted.append(obj)
+
+    bridge.emit = capture
+
+    query_started = threading.Event()
+    release_query = threading.Event()
+
+    def slow_query(pid):
+        query_started.set()
+        release_query.wait(2.0)
+        return {"title": "Old Song", "artist": "", "mode": "play"}
+
+    bridge._query_status = slow_query
+
+    # A poll (e.g. the panel-open `refresh`) starts and blocks mid-request.
+    poll = threading.Thread(target=lambda: bridge._poll_state("p1"))
+    poll.start()
+    assert query_started.wait(2.0), "poll never started"
+
+    # A newer push for the same player arrives while the poll is in flight.
+    bridge._on_push("p1", {"playlist_loop": [{"title": "New Song"}]})
+    release_query.set()
+    poll.join(2.0)
+
+    states = [e for e in emitted if e.get("ev") == "state"]
+    old = next(e for e in states if e["nowplaying"].get("title") == "Old Song")
+    new = next(e for e in states if e["nowplaying"].get("title") == "New Song")
+    # The push reserved its seq after the poll, even though the poll emitted
+    # its (stale) response last.
+    assert new["seq"] > old["seq"], states
+    assert new["seq"] > 0 and old["seq"] > 0, states
+
+    # Mirror Service.handleEvent's guard: replay in arrival order, drop older.
+    last = {}
+    applied = None
+    for e in states:
+        player = e["player"]
+        if e["seq"] > last.get(player, 0):
+            last[player] = e["seq"]
+            applied = e["nowplaying"].get("title")
+    assert applied == "New Song", (applied, states)
+    print("ok state seq guard")
+
+
 if __name__ == "__main__":
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     test_demo_sequence()
@@ -307,4 +374,5 @@ if __name__ == "__main__":
     test_bridge_survives_bad_messages()
     test_refresh_op_signature()
     test_search_op()
+    test_state_seq_guard()
     print("\nall bridge tests passed")

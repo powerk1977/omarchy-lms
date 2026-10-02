@@ -15,7 +15,12 @@ mirroring bin/oh-bridge in openhab-omarchy:
   <- {"ev":"phase","phase":"idle|connecting|connected|error","generation":N,
       "error":"...","errorKind":"auth|network"}
   <- {"ev":"players","items":[...],"generation":N}
-  <- {"ev":"state","player":"<id>","nowplaying":{...},"generation":N}
+  <- {"ev":"state","player":"<id>","nowplaying":{...},"seq":N,"generation":N}
+
+`seq` is a monotonic per-process counter reserved at the moment a status
+snapshot is requested/first received. Consumers must drop any state whose
+`seq` is not greater than the last one applied for that player: a poll that
+started before a newer CometD push can return (and emit) after it.
   <- {"ev":"servers","items":[...],"generation":N}
   <- {"ev":"coverbase","url":"http://127.0.0.1:PORT"}
   <- {"ev":"result","tag":"...","success":true|false,"error":"...","generation":N}
@@ -351,6 +356,10 @@ class Bridge:
         self._active = ""
         self._emit_lock = threading.Lock()
         self._teardown_lock = threading.Lock()
+        # Monotonic state ordering. Reserved before a (blocking) status
+        # request so a slower older poll can never outrank a newer push.
+        self._seq = 0
+        self._seq_lock = threading.Lock()
 
     # -- emitters -----------------------------------------------------------
 
@@ -447,7 +456,8 @@ class Bridge:
             self.emit({"ev": "players", "items": self._players,
                        "generation": self._generation})
             for p in self._players:
-                self._emit_state(p["playerid"], Demo().nowplaying(p["playerid"]))
+                self._emit_state(p["playerid"], Demo().nowplaying(p["playerid"]),
+                                 self._begin_state())
             self._set_phase("connected")
             return
         try:
@@ -471,7 +481,7 @@ class Bridge:
         self._refresh_players(emit=True)
         for pid in self._player_ids():
             try:
-                self._emit_state(pid, self._query_status(pid))
+                self._poll_state(pid)
             except HttpError:
                 pass
         self._set_phase("connected")
@@ -519,7 +529,7 @@ class Bridge:
         try:
             self._refresh_players(emit=True)
             for pid in self._player_ids():
-                self._emit_state(pid, self._query_status(pid))
+                self._poll_state(pid)
             self._result("", True)
         except HttpError as e:
             self._result("", False, str(e))
@@ -551,9 +561,25 @@ class Bridge:
         res = jsonrpc(self._http, pid, ["status", "0", 1, "tags:" + NOWPLAYING_TAGS])
         return _nowplaying(res, pid)
 
-    def _emit_state(self, pid, nowplaying):
+    def _begin_state(self):
+        """Reserve the ordering ticket for a status snapshot.
+
+        Called before the (possibly blocking) status request, so a poll that
+        started earlier always carries a lower seq than a push received
+        later — even if the poll's response arrives after the push.
+        """
+        with self._seq_lock:
+            self._seq += 1
+            return self._seq
+
+    def _poll_state(self, pid):
+        """Emit a queried status, ordered by when the query began."""
+        seq = self._begin_state()
+        self._emit_state(pid, self._query_status(pid), seq)
+
+    def _emit_state(self, pid, nowplaying, seq):
         self.emit({"ev": "state", "player": pid, "nowplaying": nowplaying,
-                   "generation": self._generation})
+                   "seq": seq, "generation": self._generation})
 
     # -- push ---------------------------------------------------------------
 
@@ -566,9 +592,9 @@ class Bridge:
                 if self._cometd:
                     self._cometd.subscribe(self._player_ids())
             if isinstance(data, dict) and "playlist_loop" in data:
-                self._emit_state(pid, _nowplaying(data, pid))
+                self._emit_state(pid, _nowplaying(data, pid), self._begin_state())
             else:
-                self._emit_state(pid, self._query_status(pid))
+                self._poll_state(pid)
         except HttpError:
             pass
 
