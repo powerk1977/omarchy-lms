@@ -1,7 +1,6 @@
 # REFERENCES.md — architecture references for building the plugin
 
-Copy patterns from these, do not reinvent. All local paths are on this
-machine (workspace `~/projects`).
+Copy patterns from these, do not reinvent.
 
 ## 1. openhab-omarchy — the shape to follow (primary)
 
@@ -61,7 +60,7 @@ bar-widget (`BarWidget.qml`) + panel (`RadioAtlas.qml`). Study for:
 
 - lyrion.org / slimdevices JSON-RPC & CLI docs (commands, `playerpref`,
   `syncgroups`).
-- Live probing on `http://localhost:9000` and `http://<lan-ip>:9000`
+- Live probing on `http://localhost:9000` and a second LAN server
   (see `docs/RESEARCH.md`, every claim carries a verified example).
 - `lms-mcp` server (`glama.ai/.../eggs-gd/lms-mcp`): confirmed HTTP Basic
   auth on `jsonrpc.js` with `LMS_USERNAME`/`LMS_PASSWORD` credentials.

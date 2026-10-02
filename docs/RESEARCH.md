@@ -11,17 +11,16 @@ Two servers were probed during planning. Both answer HTTP JSON-RPC on
 
 | Server | Version | Players | Notes |
 |---|---|---|---|
-| `http://localhost:9000` (= `127.0.0.1:9000`) | LMS 9.x | 2 | **Omarchy Speakers** `<mac-redacted>` (SqueezeLite, powered ON, on this machine); **remote-player** `<mac-redacted>` (RaopBridge/squeezelite). 945 albums. |
-| `http://<lan-ip>:9000` | LMS 9.1.1 | 3 | Includes **Whole house** sync group (`model":"group"`, `isgroup:1`). 10,386 songs / 1,176 artists / 65 genres. EUID `<euid-redacted>-…` |
+| `http://localhost:9000` (= `127.0.0.1:9000`) | LMS 9.x | 2 | A SqueezeLite player (powered ON, on this machine) and a remote RaopBridge/squeezelite player. 945 albums. |
+| `http://<lan-ip>:9000` | LMS 9.1.1 | 3 | Includes a **Whole house** sync group (`model":"group"`, `isgroup:1`). 10,386 songs / 1,176 artists / 65 genres. |
 
-The localhost server is the primary test target (player "Omarchy Speakers" is
-this machine). `research/lms_players.items` maps openHAB bidding bridge IDs:
-Mac-mini server `ce2b55bbbc`, Thinkpad server `21e67cd904`.
+The localhost server is the primary test target (the local SqueezeLite
+player runs on this machine).
 
 Player enumeration identifies sync groups: entries with
 `isgroup == 1` or `model == "group"` are groups, not standalone players.
-`research/LMS_player_controller.py` excludes accessory/casting nodes by name
-(`TV`, `MacBook`, `Mac mini`, `XBOX`, `SB2`, `piCore`).
+Accessory/casting nodes (TVs, consoles, laptops) can be excluded by name
+when enumerating.
 
 ## Transport: HTTP JSON-RPC (commands)
 
@@ -59,7 +58,7 @@ Subscribe (verified). Both channel spellings are accepted; use
 ```bash
 curl -s -X POST http://localhost:9000/cometd -H 'Content-Type: application/json' \
   -d "[{\"advice\":{\"timeout\":0},\"channel\":\"/meta/subscribe\",\
-       \"clientId\":\"$CID\",\"id\":\"2\",\"subscription\":\"/player/<mac-redacted>\"}]"
+       \"clientId\":\"$CID\",\"id\":\"2\",\"subscription\":\"/player/<playerid>\"}]"
 ```
 
 → `{"successful":true,"channel":"/meta/subscribe","subscription":"/player/…"}`
@@ -97,7 +96,7 @@ seek, power (`"power",0|1`).
 ```bash
 curl -s -X POST http://localhost:9000/jsonrpc.js -H 'Content-Type: application/json' \
   -d '{"id":1,"method":"slim.request",\
-       "params":["<mac-redacted>",["playerpref","<mac-redacted>","syncDelay","?"]]}'
+       "params":["<playerid>",["playerpref","<playerid>","syncDelay","?"]]}'
 ```
 
 → `"result":{"_p2":null}` — so "unset" and "0 ms" are distinguishable only by
