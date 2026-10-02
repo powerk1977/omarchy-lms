@@ -31,7 +31,7 @@ Panel {
   readonly property string glyphNote: "󰝚"    // md-music (cover placeholder)
   readonly property string glyphMusic: "󰝚"   // md-music-note (idle state)
   readonly property string glyphGear: "󰒓"    // md-cog
-  readonly property string glyphQueue: "󰲸"   // md-playlist-music (queue toggle)
+  readonly property string glyphQueue: "󰎆"   // md-playlist-play (queue toggle)
   readonly property string glyphClose: "󰅖"   // md-close (remove from queue)
   readonly property string glyphVolHi: "󰕾"   // md-volume-high
   readonly property string glyphVolOff: "󰖁"  // md-volume-off
