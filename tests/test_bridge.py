@@ -271,6 +271,44 @@ def test_bridge_survives_bad_messages():
     print("ok bridge survives bad messages")
 
 
+def test_status_query_uses_current_track():
+    """Regression: status polls must ask LMS for the CURRENT track.
+
+    `status 0 1` returns playlist index 0, so the connect-time poll, the
+    panel-open `refresh`, and any push-without-playlist fallback used to
+    overwrite now-playing with the playlist's first (oldest) song — the
+    panel-open song revert. `status - 1` starts at the current song, matching
+    the CometD subscribe query."""
+    fake = FakeLMS().start()
+    fake.tracks = ["Old Song", "New Song"]
+    fake.cur_index = 1
+    bp = BridgeProc()
+    try:
+        bp.wait_for(lambda e: e.get("ev") == "hello")
+        bp.send({"op": "config", "generation": 1, "host": "127.0.0.1",
+                 "port": fake.port, "playerId": PID1})
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+
+        # Connect-time poll reports the current track, not position 0.
+        bp.wait_for(lambda e: e.get("ev") == "state" and e.get("player") == PID1
+                    and e["nowplaying"].get("title") == "New Song")
+        titles = [e["nowplaying"].get("title") for e in bp.by_ev("state")
+                  if e.get("player") == PID1]
+        assert "Old Song" not in titles, titles
+
+        # A panel-open `refresh` must not resurrect the playlist's first track.
+        bp.send({"op": "refresh"})
+        bp.wait_for(lambda e: e.get("ev") == "result" and e.get("success") is True)
+        titles = [e["nowplaying"].get("title") for e in bp.by_ev("state")
+                  if e.get("player") == PID1]
+        assert "Old Song" not in titles, titles
+        assert titles.count("New Song") >= 2, titles
+    finally:
+        bp.close()
+        fake.stop()
+    print("ok status query uses current track")
+
+
 def test_search_op():
     fake = FakeLMS().start()
     bp = BridgeProc()
@@ -375,4 +413,5 @@ if __name__ == "__main__":
     test_refresh_op_signature()
     test_search_op()
     test_state_seq_guard()
+    test_status_query_uses_current_track()
     print("\nall bridge tests passed")

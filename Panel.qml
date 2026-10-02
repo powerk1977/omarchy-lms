@@ -237,8 +237,24 @@ Panel {
       visible: root.showBarLabel
       anchors.verticalCenter: parent.verticalCenter
 
+      // Restart the marquee whenever the label text, its width, or the
+      // clip geometry/visibility changes. A declarative `running` binding
+      // left x parked at a stale negative offset when the text changed
+      // mid-flight (or when the panel opened/closed), so the label froze
+      // off-screen or stopped scrolling. Stop, reset to the resting
+      // position, then (re)start only when the text actually overflows.
+      function restartMarquee() {
+        marquee.stop()
+        labelText.x = 0
+        if (labelText.needsScroll && !root.opened && !(root.bar && root.bar.vertical))
+          marquee.restart()
+      }
+      onWidthChanged: restartMarquee()
+      onVisibleChanged: restartMarquee()
+
       Text {
         id: labelText
+        x: 0
         textFormat: Text.PlainText
         text: (root.lms ? (root.lms.title || "") : "")
           + (root.lms && root.lms.artist ? "  ·  " + root.lms.artist : "")
@@ -248,15 +264,21 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
 
         property bool needsScroll: implicitWidth > scrollClip.width
+        onImplicitWidthChanged: scrollClip.restartMarquee()
+        onTextChanged: scrollClip.restartMarquee()
+      }
 
-        NumberAnimation on x {
-          running: labelText.needsScroll && !root.opened && !(root.bar && root.bar.vertical)
-          loops: Animation.Infinite
-          duration: Math.max(6000, labelText.implicitWidth * 25)
-          from: scrollClip.width
-          to: -labelText.implicitWidth
-          easing.type: Easing.Linear
-        }
+      NumberAnimation {
+        id: marquee
+        target: labelText
+        property: "x"
+        running: false
+        loops: Animation.Infinite
+        duration: Math.max(6000, labelText.implicitWidth * 25)
+        from: scrollClip.width
+        to: -labelText.implicitWidth
+        easing.type: Easing.Linear
+        onStopped: labelText.x = 0
       }
     }
   }

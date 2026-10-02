@@ -558,7 +558,11 @@ class Bridge:
             self._result(tag, False, str(e))
 
     def _query_status(self, pid):
-        res = jsonrpc(self._http, pid, ["status", "0", 1, "tags:" + NOWPLAYING_TAGS])
+        # `-` makes LMS return the playlist starting at the *current* song;
+        # `0` would return playlist index 0, so every poll (panel-open refresh,
+        # push without playlist data) used to overwrite now-playing with the
+        # playlist's first/oldest track. Match the CometD subscribe query.
+        res = jsonrpc(self._http, pid, ["status", "-", 1, "tags:" + NOWPLAYING_TAGS])
         return _nowplaying(res, pid)
 
     def _begin_state(self):
