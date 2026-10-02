@@ -29,7 +29,7 @@ Panel {
   readonly property string glyphPrev: "󰒮"    // md-skip-previous
   readonly property string glyphNext: "󰒭"    // md-skip-next
   readonly property string glyphNote: "󰝚"    // md-music (cover placeholder)
-  readonly property string glyphMusic: "󰐉"   // md-music-note (idle state)
+  readonly property string glyphMusic: "󰝚"   // md-music-note (idle state)
   readonly property string glyphGear: "󰒓"    // md-cog
   readonly property string glyphQueue: "󰲸"   // md-playlist-music (queue toggle)
   readonly property string glyphClose: "󰅖"   // md-close (remove from queue)
@@ -409,7 +409,7 @@ Panel {
 
           PanelHero {
             width: parent.width
-            title: "Lyrion"
+            title: "OmaLMS"
             meta: root.phase
             foreground: root.fg
             iconOpacity: root.phase === "connected" ? 1.0 : 0.55
