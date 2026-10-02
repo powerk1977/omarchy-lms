@@ -31,6 +31,8 @@ class FakeLMS:
         # (mirrors the real LMS CLI, so an offset bug is observable).
         self.tracks = ["Test Song"]
         self.cur_index = 0
+        self.shuffle = 0  # playerpref shuffle: 0 sequential, 1 songs, 2 albums
+        self.unshuffled = None  # order saved when shuffle is first enabled
         self.commands = []  # every (player, cli) the bridge sent
         self.connect_calls = 0
         self.cover_paths = []  # every cover-art request path the bridge proxied
@@ -58,13 +60,19 @@ class FakeLMS:
 
     # -- protocol -----------------------------------------------------------
 
-    def _status_payload(self, start="-"):
+    def _status_payload(self, start="-", count=1, tags=""):
         """The status dict this fake reports for its current state.
 
-        Honours the LMS `status <start> ...` semantics: `-` starts at the
-        currently playing track, a numeric start at that playlist position.
+        Honours the LMS `status <start> <count> <tags>` semantics: `-` starts
+        at the currently playing track, a numeric start at that playlist
+        position, and count bounds the returned playlist slice. Requested tags
+        (`t` title, `a` artist, `l` album) gate the per-track fields, so the
+        `tags:aat` queue query sees title+artist while a bare status still
+        gets a title.
         """
-        tracks = getattr(self, "tracks", ["Test Song"]) or ["Test Song"]
+        tracks = getattr(self, "tracks", None)
+        if tracks is None:
+            tracks = ["Test Song"]
         if start == "-":
             idx = self.cur_index
         else:
@@ -74,16 +82,103 @@ class FakeLMS:
                 idx = self.cur_index
         if not 0 <= idx < len(tracks):
             idx = self.cur_index if 0 <= self.cur_index < len(tracks) else 0
+        try:
+            count = max(1, int(count))
+        except (TypeError, ValueError):
+            count = 1
+        loop = []
+        for pos in range(idx, min(idx + count, len(tracks))):
+            item = {"id": 100 + pos, "duration": 200, "coverid": "cover42"}
+            if not tags or "t" in tags:
+                item["title"] = tracks[pos]
+            if not tags or "a" in tags:
+                item["artist"] = "Test Artist"
+            if not tags or "l" in tags:
+                item["album"] = "Test Album"
+            loop.append(item)
         return {
             "mode": self.mode,
             "power": 1 if self.mode != "stop" else 0,
             "time": 12,
             "mixer volume": self.volume,
             "playlist_cur_index": str(self.cur_index),
-            "playlist_loop": [{"id": 99, "title": tracks[idx],
-                               "artist": "Test Artist", "album": "Test Album",
-                               "duration": 200, "coverid": "cover42"}],
+            "playlist_loop": loop,
         }
+
+    def _playlist_command(self, verb, arg):
+        """Apply `playlist index|delete|clear|shuffle <arg>` the way LMS would."""
+        if verb == "index":
+            try:
+                if str(arg).startswith(("+", "-")):
+                    self.cur_index += int(arg)
+                else:
+                    self.cur_index = int(arg)
+            except (TypeError, ValueError):
+                return
+            self.cur_index = max(0, min(len(self.tracks) - 1, self.cur_index))
+        elif verb == "delete":
+            try:
+                pos = int(arg)
+            except (TypeError, ValueError):
+                return
+            if 0 <= pos < len(self.tracks):
+                del self.tracks[pos]
+                if pos < self.cur_index:
+                    self.cur_index -= 1
+                if self.tracks:
+                    self.cur_index = max(0, min(len(self.tracks) - 1, self.cur_index))
+                else:
+                    self.cur_index = 0
+        elif verb == "clear":
+            self.tracks = []
+            self.cur_index = 0
+        elif verb == "shuffle":
+            self._apply_shuffle(arg)
+
+    def _apply_shuffle(self, arg):
+        """Reorder the live playlist deterministically.
+
+        Mode 0 restores the order saved before the first shuffle; mode 1
+        rotates the list left and mode 2 reverses it, so tests can assert a
+        concrete new order without depending on randomness."""
+        try:
+            mode = int(arg)
+        except (TypeError, ValueError):
+            return
+        self.shuffle = mode
+        if mode == 0:
+            if self.unshuffled is not None:
+                self.tracks = list(self.unshuffled)
+            self.cur_index = 0
+            return
+        if self.unshuffled is None:
+            self.unshuffled = list(self.tracks)
+        if mode == 1 and self.tracks:
+            self.tracks = self.tracks[1:] + self.tracks[:1]
+        elif mode == 2:
+            self.tracks = list(reversed(self.tracks))
+        self.cur_index = 0
+
+    def _playerpref(self, cli):
+        """`playerpref shuffle [0|1|2|?]` -> {"_p2": value}.
+
+        Mirrors LMS: the read (`?`) and the write both answer with `_p2`, and
+        an unset pref is reported as null. Accepts both the correct form
+        (["playerpref","shuffle",...]) and the legacy double-pid form
+        (["playerpref",<pid>,"shuffle",...]) defensively."""
+        args = cli[1:]
+        pref = "shuffle" if (args and args[0] == "shuffle") else (
+            args[1] if len(args) > 1 else "")
+        if pref != "shuffle":
+            return {}
+        value = args[2] if pref == "shuffle" and len(args) > 2 else (
+            args[2] if len(args) > 2 else "?")
+        if value != "?":
+            try:
+                self.shuffle = int(value)
+            except (TypeError, ValueError):
+                pass
+        return {"_p2": str(self.shuffle) if self.shuffle is not None else None}
 
     def jsonrpc(self, player, cli):
         self.commands.append((player, list(cli)))
@@ -94,7 +189,15 @@ class FakeLMS:
         if cmd == "players":
             return {"count": len(PLAYERS), "players_loop": PLAYERS}
         if cmd == "status":
-            return self._status_payload(cli[1] if len(cli) > 1 else "-")
+            start = cli[1] if len(cli) > 1 else "-"
+            count = cli[2] if len(cli) > 2 else 1
+            tags = ""
+            for part in cli[3:]:
+                if part.startswith("tags:"):
+                    tags = part[len("tags:"):]
+            return self._status_payload(start, count, tags)
+        if cmd == "playerpref":
+            return self._playerpref(cli)
         if cmd in ("albums", "artists", "playlists"):
             term = ""
             for part in cli[3:]:
@@ -117,6 +220,9 @@ class FakeLMS:
             self.mode = "play"
         elif cmd == "mixer":
             self.volume = int(cli[2])
+        elif cmd == "playlist":
+            self._playlist_command(cli[1] if len(cli) > 1 else "",
+                                   cli[2] if len(cli) > 2 else "")
         # Like the real LMS: a state-changing command triggers an async push.
         if cmd in ("pause", "play", "mixer", "playlist", "time", "power"):
             self.pending_pushes.append(self._status_payload())

@@ -402,6 +402,277 @@ def test_state_seq_guard():
     print("ok state seq guard")
 
 
+def test_queue_op():
+    """The queue op returns every playlist entry with the current one flagged."""
+    fake = FakeLMS().start()
+    fake.tracks = ["First", "Second", "Third"]
+    fake.cur_index = 1
+    bp = BridgeProc()
+    try:
+        bp.wait_for(lambda e: e.get("ev") == "hello")
+        bp.send({"op": "config", "generation": 1, "host": "127.0.0.1",
+                 "port": fake.port, "playerId": PID1})
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+
+        bp.send({"op": "queue", "player": PID1, "tag": "q1"})
+        res = bp.wait_for(lambda e: e.get("ev") == "queueResults"
+                          and e.get("tag") == "q1")
+        assert res["player"] == PID1, res
+        assert [i["title"] for i in res["items"]] == ["First", "Second", "Third"], res
+        assert [i["artist"] for i in res["items"]] == ["Test Artist"] * 3, res
+        assert [i["current"] for i in res["items"]] == [False, True, False], res
+        ids = [i["id"] for i in res["items"]]
+        assert len(set(ids)) == 3, ids
+        assert isinstance(res.get("seq"), int) and res["seq"] > 0, res
+        # Queries the playlist from index 0 with title+artist tags.
+        assert any(cli[:3] == ["status", "0", "50"] and cli[3] == "tags:aat"
+                   for _p, cli in fake.commands), fake.commands
+        bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "q1"
+                    and e.get("success") is True)
+    finally:
+        bp.close()
+        fake.stop()
+    print("ok queue op")
+
+
+def test_queue_jump_and_delete():
+    """queueJump/queueDelete map to playlist index/delete <N>."""
+    fake = FakeLMS().start()
+    fake.tracks = ["First", "Second", "Third"]
+    fake.cur_index = 0
+    bp = BridgeProc()
+    try:
+        bp.wait_for(lambda e: e.get("ev") == "hello")
+        bp.send({"op": "config", "generation": 1, "host": "127.0.0.1",
+                 "port": fake.port, "playerId": PID1})
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+
+        bp.send({"op": "queueJump", "player": PID1, "index": 2, "tag": "j1"})
+        bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "j1"
+                    and e.get("success") is True)
+        assert any(cli == ["playlist", "index", "2"]
+                   for _p, cli in fake.commands), fake.commands
+        assert fake.cur_index == 2, fake.cur_index
+
+        bp.send({"op": "queueDelete", "player": PID1, "index": 0, "tag": "d1"})
+        bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "d1"
+                    and e.get("success") is True)
+        assert any(cli == ["playlist", "delete", "0"]
+                   for _p, cli in fake.commands), fake.commands
+        assert fake.tracks == ["Second", "Third"], fake.tracks
+
+        # A malformed index fails cleanly instead of crashing the bridge.
+        bp.send({"op": "queueDelete", "player": PID1, "index": "x", "tag": "d2"})
+        bad = bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "d2")
+        assert bad["success"] is False, bad
+        assert bp.proc.poll() is None
+    finally:
+        bp.close()
+        fake.stop()
+    print("ok queue jump and delete")
+
+
+def test_queue_stale_seq_guard():
+    """A stale queue response must not outrank a newer one.
+
+    The bridge reserves a monotonic seq before the queue query (same counter as
+    state); a consumer applies queueResults in arrival order but drops seq <=
+    the last applied. A query that started first can return last without
+    winning."""
+    lb = _load_bridge()
+    bridge = lb.Bridge()
+    bridge._http = True  # _handle_queue bails without a connection
+    bridge._active = "p1"
+    emitted = []
+    emit_lock = threading.Lock()
+
+    def capture(obj):
+        with emit_lock:
+            emitted.append(obj)
+
+    bridge.emit = capture
+
+    query_started = threading.Event()
+    release_query = threading.Event()
+    calls = {"n": 0}
+
+    def fake_jsonrpc(_http, _player, _cli):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            query_started.set()
+            release_query.wait(2.0)
+            return {"playlist_cur_index": "0", "playlist_loop": [
+                {"id": 1, "title": "Old Song", "artist": "A"}]}
+        return {"playlist_cur_index": "0", "playlist_loop": [
+            {"id": 2, "title": "New Song", "artist": "B"}]}
+
+    lb.jsonrpc = fake_jsonrpc
+
+    # An earlier queue fetch starts and blocks mid-request.
+    first = threading.Thread(target=lambda: bridge._handle_queue({"tag": "q1"}))
+    first.start()
+    assert query_started.wait(2.0), "queue fetch never started"
+
+    # A newer queue fetch completes while the first is still in flight.
+    bridge._handle_queue({"tag": "q2"})
+    release_query.set()
+    first.join(2.0)
+
+    results = [e for e in emitted if e.get("ev") == "queueResults"]
+    old = next(e for e in results if e["items"][0]["title"] == "Old Song")
+    new = next(e for e in results if e["items"][0]["title"] == "New Song")
+    assert new["seq"] > old["seq"], results
+    assert new["seq"] > 0 and old["seq"] > 0, results
+
+    # Mirror Service.handleEvent's queue guard: replay in arrival order.
+    last = 0
+    applied = None
+    for e in results:
+        if e["seq"] > last:
+            last = e["seq"]
+            applied = e["items"][0]["title"]
+    assert applied == "New Song", (applied, results)
+    print("ok queue stale seq guard")
+
+
+def test_queue_clear():
+    """queueClear empties the playlist and emits an empty queueResults."""
+    fake = FakeLMS().start()
+    fake.tracks = ["First", "Second", "Third"]
+    fake.cur_index = 1
+    bp = BridgeProc()
+    try:
+        bp.wait_for(lambda e: e.get("ev") == "hello")
+        bp.send({"op": "config", "generation": 1, "host": "127.0.0.1",
+                 "port": fake.port, "playerId": PID1})
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+
+        bp.send({"op": "queue", "player": PID1, "tag": "q1"})
+        full = bp.wait_for(lambda e: e.get("ev") == "queueResults"
+                           and e.get("tag") == "q1")
+        assert len(full["items"]) == 3, full
+
+        bp.send({"op": "queueClear", "player": PID1, "tag": "c1"})
+        cleared = bp.wait_for(lambda e: e.get("ev") == "queueResults"
+                              and e.get("tag") == "c1")
+        assert cleared["items"] == [], cleared
+        assert cleared["player"] == PID1, cleared
+        assert isinstance(cleared.get("seq"), int) and cleared["seq"] > 0, cleared
+        bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "c1"
+                    and e.get("success") is True)
+        assert any(cli == ["playlist", "clear"]
+                   for _p, cli in fake.commands), fake.commands
+        assert fake.tracks == [], fake.tracks
+
+        # A follow-up fetch confirms the server-side queue is empty.
+        bp.send({"op": "queue", "player": PID1, "tag": "q2"})
+        q2 = bp.wait_for(lambda e: e.get("ev") == "queueResults"
+                         and e.get("tag") == "q2")
+        assert q2["items"] == [], q2
+    finally:
+        bp.close()
+        fake.stop()
+    print("ok queue clear")
+
+
+def test_playmode_get_set():
+    """playmode get/set round-trips through playerpref shuffle."""
+    fake = FakeLMS().start()
+    bp = BridgeProc()
+    try:
+        bp.wait_for(lambda e: e.get("ev") == "hello")
+        bp.send({"op": "config", "generation": 1, "host": "127.0.0.1",
+                 "port": fake.port, "playerId": PID1})
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+
+        bp.send({"op": "playmode", "player": PID1, "tag": "p1"})
+        ev = bp.wait_for(lambda e: e.get("ev") == "playmode" and e.get("tag") == "p1")
+        assert ev["value"] == 0, ev
+        assert ev["player"] == PID1, ev
+        assert isinstance(ev.get("seq"), int) and ev["seq"] > 0, ev
+        bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "p1"
+                    and e.get("success") is True)
+        assert any(cli == ["playerpref", "shuffle", "?"]
+                   for _p, cli in fake.commands), fake.commands
+
+        # set -> emits the new value and writes the pref
+        bp.send({"op": "playmodeSet", "player": PID1, "value": 2, "tag": "p2"})
+        ev2 = bp.wait_for(lambda e: e.get("ev") == "playmode" and e.get("tag") == "p2")
+        assert ev2["value"] == 2, ev2
+        assert fake.shuffle == 2, fake.shuffle
+        bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "p2"
+                    and e.get("success") is True)
+        assert any(cli == ["playerpref", "shuffle", "2"]
+                   for _p, cli in fake.commands), fake.commands
+
+        # get again reflects the written value
+        bp.send({"op": "playmode", "player": PID1, "tag": "p3"})
+        ev3 = bp.wait_for(lambda e: e.get("ev") == "playmode" and e.get("tag") == "p3")
+        assert ev3["value"] == 2, ev3
+
+        # out-of-range values are rejected without touching the server
+        n_cmds = len(fake.commands)
+        bp.send({"op": "playmodeSet", "player": PID1, "value": 9, "tag": "p4"})
+        bad = bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "p4")
+        assert bad["success"] is False, bad
+        assert len(fake.commands) == n_cmds, fake.commands
+        assert bp.proc.poll() is None
+    finally:
+        bp.close()
+        fake.stop()
+    print("ok playmode get/set")
+
+
+def test_playmode_set_reorders_queue():
+    """playmodeSet must reorder the CURRENT playlist, not just the pref.
+
+    `playerpref shuffle N` only affects future playlists, so the bridge also
+    sends `playlist shuffle N` and re-queries the queue. The fake reorders
+    deterministically (mode 1 rotates left, mode 0 restores)."""
+    fake = FakeLMS().start()
+    fake.tracks = ["First", "Second", "Third"]
+    fake.cur_index = 0
+    bp = BridgeProc()
+    try:
+        bp.wait_for(lambda e: e.get("ev") == "hello")
+        bp.send({"op": "config", "generation": 1, "host": "127.0.0.1",
+                 "port": fake.port, "playerId": PID1})
+        bp.wait_for(lambda e: e.get("ev") == "phase" and e.get("phase") == "connected")
+
+        bp.send({"op": "queue", "player": PID1, "tag": "q0"})
+        before = bp.wait_for(lambda e: e.get("ev") == "queueResults"
+                             and e.get("tag") == "q0")
+        assert [i["title"] for i in before["items"]] == ["First", "Second", "Third"], before
+
+        bp.send({"op": "playmodeSet", "player": PID1, "value": 1, "tag": "ps"})
+        after = bp.wait_for(lambda e: e.get("ev") == "queueResults"
+                            and e.get("tag") == "ps")
+        titles = [i["title"] for i in after["items"]]
+        assert titles == ["Second", "Third", "First"], after
+        assert titles != [i["title"] for i in before["items"]], after
+        assert after["player"] == PID1, after
+
+        pm = bp.wait_for(lambda e: e.get("ev") == "playmode" and e.get("tag") == "ps")
+        assert pm["value"] == 1, pm
+        bp.wait_for(lambda e: e.get("ev") == "result" and e.get("tag") == "ps"
+                    and e.get("success") is True)
+        assert fake.shuffle == 1, fake.shuffle
+        assert any(cli == ["playerpref", "shuffle", "1"]
+                   for _p, cli in fake.commands), fake.commands
+        assert any(cli == ["playlist", "shuffle", "1"]
+                   for _p, cli in fake.commands), fake.commands
+
+        # Mode 0 restores the order saved before the first shuffle.
+        bp.send({"op": "playmodeSet", "player": PID1, "value": 0, "tag": "ps0"})
+        restored = bp.wait_for(lambda e: e.get("ev") == "queueResults"
+                               and e.get("tag") == "ps0")
+        assert [i["title"] for i in restored["items"]] == ["First", "Second", "Third"], restored
+    finally:
+        bp.close()
+        fake.stop()
+    print("ok playmode set reorders queue")
+
+
 if __name__ == "__main__":
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     test_demo_sequence()
@@ -414,4 +685,10 @@ if __name__ == "__main__":
     test_search_op()
     test_state_seq_guard()
     test_status_query_uses_current_track()
+    test_queue_op()
+    test_queue_jump_and_delete()
+    test_queue_stale_seq_guard()
+    test_queue_clear()
+    test_playmode_get_set()
+    test_playmode_set_reorders_queue()
     print("\nall bridge tests passed")

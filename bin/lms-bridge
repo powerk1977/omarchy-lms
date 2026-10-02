@@ -11,11 +11,23 @@ mirroring bin/oh-bridge in openhab-omarchy:
   -> {"op":"discover"}
   -> {"op":"selectPlayer","player":"<id>"}
   -> {"op":"cmd","player":"<id>","cli":["pause","1"],"tag":"..."}
+  -> {"op":"search","q":"...","tag":"..."}
+  -> {"op":"queue","player":"<id>?","tag":"..."}
+  -> {"op":"queueJump","player":"<id>?","index":N,"tag":"..."}
+  -> {"op":"queueDelete","player":"<id>?","index":N,"tag":"..."}
+  -> {"op":"queueClear","player":"<id>?","tag":"..."}
+  -> {"op":"playmode","player":"<id>?","tag":"..."}
+  -> {"op":"playmodeSet","player":"<id>?","value":0|1|2,"tag":"..."}
   -> {"op":"shutdown"}
   <- {"ev":"phase","phase":"idle|connecting|connected|error","generation":N,
       "error":"...","errorKind":"auth|network"}
   <- {"ev":"players","items":[...],"generation":N}
   <- {"ev":"state","player":"<id>","nowplaying":{...},"seq":N,"generation":N}
+  <- {"ev":"queueResults","tag":"...","player":"<id>",
+      "items":[{"id":N,"title":"...","artist":"...","current":bool}],
+      "seq":N,"generation":N}
+  <- {"ev":"playmode","tag":"...","player":"<id>","value":0|1|2,
+      "seq":N,"generation":N}
 
 `seq` is a monotonic per-process counter reserved at the moment a status
 snapshot is requested/first received. Consumers must drop any state whose
@@ -410,6 +422,12 @@ class Bridge:
             "selectPlayer": self._handle_select,
             "cmd": self._handle_cmd,
             "search": self._handle_search,
+            "queue": self._handle_queue,
+            "queueJump": self._handle_queue_jump,
+            "queueDelete": self._handle_queue_delete,
+            "queueClear": self._handle_queue_clear,
+            "playmode": self._handle_playmode,
+            "playmodeSet": self._handle_playmode_set,
         }
         if op == "shutdown":
             self.emit({"ev": "exited", "reason": "shutdown"})
@@ -536,6 +554,15 @@ class Bridge:
 
     def _handle_select(self, msg):
         self._active = msg.get("player", "") or ""
+        # Push a fresh snapshot for the newly selected player right away,
+        # otherwise the panel keeps showing the previous player's
+        # now-playing until some unrelated push happens to arrive.
+        if self._active and not self._demo:
+            try:
+                self._poll_state(self._active)
+            except HttpError as e:
+                self._result(msg.get("tag", ""), False, str(e))
+                return
         self._result(msg.get("tag", ""), True)
 
     def _handle_cmd(self, msg):
@@ -670,6 +697,163 @@ class Bridge:
         except HttpError as e:
             self._result(tag, False, str(e))
 
+    # -- queue --------------------------------------------------------------
+
+    def _handle_queue(self, msg):
+        """Panel queue: the playlist from index 0, with the current flagged.
+
+        Uses the same monotonic seq guard as state snapshots: the ticket is
+        reserved before the blocking query so a queue response that started
+        before a newer one can be dropped by the consumer.
+        """
+        tag = msg.get("tag", "")
+        player = msg.get("player") or self._active
+        seq = self._begin_state()
+        if self._demo:
+            self._emit_queue(player, [
+                {"id": 1, "title": "Demo Track", "artist": "Demo Artist",
+                 "current": True},
+            ], seq, tag)
+            self._result(tag, True)
+            return
+        if not self._http:
+            self._result(tag, False, "not connected")
+            return
+        try:
+            self._emit_queue(player, self._query_queue(player), seq, tag)
+            self._result(tag, True)
+        except HttpError as e:
+            self._result(tag, False, str(e))
+
+    def _query_queue(self, player):
+        """Fetch the current playlist snapshot (shared by queue/playmodeSet)."""
+        res = jsonrpc(self._http, player, ["status", "0", "50", "tags:aat"])
+        return _queue_items(res)
+
+    def _emit_queue(self, player, items, seq, tag):
+        self.emit({"ev": "queueResults", "tag": tag, "player": player,
+                   "items": items, "seq": seq, "generation": self._generation})
+
+    def _handle_queue_jump(self, msg):
+        self._playlist_index_op(msg, "index")
+
+    def _handle_queue_delete(self, msg):
+        self._playlist_index_op(msg, "delete")
+
+    def _playlist_index_op(self, msg, verb):
+        """Send `playlist <verb> <index>` (jump/delete) for a queue entry."""
+        tag = msg.get("tag", "")
+        player = msg.get("player") or self._active
+        index = msg.get("index")
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            self._result(tag, False, "invalid index")
+            return
+        if self._demo:
+            self._result(tag, True)
+            return
+        if not self._http:
+            self._result(tag, False, "not connected")
+            return
+        try:
+            jsonrpc(self._http, player, ["playlist", verb, str(index)])
+            self._result(tag, True)
+        except HttpError as e:
+            self._result(tag, False, str(e))
+
+    def _handle_queue_clear(self, msg):
+        """Empty the playlist, then publish an empty queue snapshot.
+
+        Clears LMS first (so the push we get back reflects an empty playlist),
+        then emits queueResults([]) on the same seq-guarded path as `queue` —
+        the optimistic local clear the Panel can bind to."""
+        tag = msg.get("tag", "")
+        player = msg.get("player") or self._active
+        seq = self._begin_state()
+        if not self._demo and not self._http:
+            self._result(tag, False, "not connected")
+            return
+        try:
+            if not self._demo:
+                jsonrpc(self._http, player, ["playlist", "clear"])
+            self._emit_queue(player, [], seq, tag)
+            self._result(tag, True)
+        except HttpError as e:
+            self._result(tag, False, str(e))
+
+    # -- playmode (shuffle 0=off / 1=songs / 2=albums) ----------------------
+
+    def _handle_playmode(self, msg):
+        """Query the player's shuffle pref and emit a normalized 0/1/2.
+
+        LMS answers `playerpref shuffle ?` (player id as the request target
+        only — including it inside the command array makes LMS treat it as
+        the pref name) with `{"_p2": <v>}` (null when
+        never set), so the value is coerced into an int and anything outside
+        0/1/2 falls back to 0 (sequential)."""
+        tag = msg.get("tag", "")
+        player = msg.get("player") or self._active
+        seq = self._begin_state()
+        if self._demo:
+            self._emit_playmode(player, 0, seq, tag)
+            self._result(tag, True)
+            return
+        if not self._http:
+            self._result(tag, False, "not connected")
+            return
+        try:
+            res = jsonrpc(self._http, player,
+                          ["playerpref", "shuffle", "?"])
+            self._emit_playmode(player, _playmode_value(res), seq, tag)
+            self._result(tag, True)
+        except HttpError as e:
+            self._result(tag, False, str(e))
+
+    def _handle_playmode_set(self, msg):
+        """Set shuffle mode and make it take effect on the current queue.
+
+        `playerpref shuffle <n>` only affects *future* playlists, so we also
+        send `playlist shuffle <n>`, which reorders the playlist already
+        playing. Then we re-query the queue on the same seq-guarded path as
+        `queue` so the Panel sees the new order immediately, and emit the new
+        playmode value.
+        """
+        tag = msg.get("tag", "")
+        player = msg.get("player") or self._active
+        try:
+            value = int(msg.get("value"))
+        except (TypeError, ValueError):
+            self._result(tag, False, "invalid playmode")
+            return
+        if value not in (0, 1, 2):
+            self._result(tag, False, "invalid playmode")
+            return
+        seq = self._begin_state()
+        if not self._demo and not self._http:
+            self._result(tag, False, "not connected")
+            return
+        try:
+            if not self._demo:
+                # Persist for future playlists...
+                jsonrpc(self._http, player,
+                        ["playerpref", "shuffle", str(value)])
+                # ...and reorder the playlist that is already queued.
+                jsonrpc(self._http, player, ["playlist", "shuffle", str(value)])
+                items = self._query_queue(player)
+            else:
+                items = [{"id": 1, "title": "Demo Track",
+                          "artist": "Demo Artist", "current": True}]
+            self._emit_queue(player, items, seq, tag)
+            self._emit_playmode(player, value, seq, tag)
+            self._result(tag, True)
+        except HttpError as e:
+            self._result(tag, False, str(e))
+
+    def _emit_playmode(self, player, value, seq, tag):
+        self.emit({"ev": "playmode", "tag": tag, "player": player,
+                   "value": value, "seq": seq, "generation": self._generation})
+
     # -- teardown -----------------------------------------------------------
 
     def _teardown(self):
@@ -682,6 +866,45 @@ class Bridge:
                 self._cover = None
             self._http = None
             self._phase = "idle"
+
+
+def _queue_items(res):
+    """Normalize an LMS `status 0 N tags:aat` result into queue entries.
+
+    The query starts at playlist index 0, so a loop position maps 1:1 to a
+    playlist index and matches `playlist_cur_index` (the currently playing
+    track)."""
+    if not isinstance(res, dict):
+        return []
+    loop = res.get("playlist_loop") or []
+    cur = _coerce_int(res.get("playlist_cur_index", -1), -1)
+    return [{
+        "id": t.get("id"),
+        "title": t.get("title", ""),
+        "artist": t.get("artist", ""),
+        "current": i == cur,
+    } for i, t in enumerate(loop)]
+
+
+def _playmode_value(res):
+    """Normalize an LMS `playerpref <id> shuffle ?` result to 0/1/2.
+
+    Real LMS returns the pref in `_p2` (null when unset); accept a couple of
+    alternative key spellings defensively. Anything not exactly 1 or 2 maps to
+    0 (sequential)."""
+    if not isinstance(res, dict):
+        return 0
+    val = res.get("_p2")
+    if val is None:
+        for key in ("shuffle", "value", "_p1", "playerpref"):
+            if res.get(key) is not None:
+                val = res[key]
+                break
+    try:
+        n = int(str(val).strip())
+    except (TypeError, ValueError):
+        return 0
+    return n if n in (1, 2) else 0
 
 
 def _nowplaying(res, pid):

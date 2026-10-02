@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "io.github.powerk1977.lms",
-  "name": "Lyrion Music",
+  "name": "OmaLMS",
   "version": "0.1.0",
   "author": "powerk1977",
   "license": "MIT",
@@ -18,7 +18,7 @@
     "overlay": "Settings.qml"
   },
   "barWidget": {
-    "displayName": "Lyrion Music",
+    "displayName": "OmaLMS",
     "description": "Now playing, transport, volume, and player selection for Lyrion Music Server.",
     "category": "Media",
     "aliases": [
