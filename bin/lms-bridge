@@ -97,12 +97,69 @@ class HttpError(Exception):
         self.kind = kind
 
 
+def _origin(url):
+    """(scheme, host, port) for a URL, with default ports filled in.
+
+    Used to decide whether a redirect stays on the same origin. Returns None
+    for URLs we cannot parse, which callers treat as "different origin"."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        return None
+    if not scheme or not host:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return (scheme, host, port)
+
+
+class _CredentialSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse cross-origin redirects and never carry credentials across one.
+
+    CPython's HTTPRedirectHandler re-sends the original headers — including
+    Authorization — to whatever origin a 3xx points at. A compromised LMS
+    could therefore redirect an authenticated request to an attacker host and
+    harvest the user's Basic credentials. We reject any redirect whose
+    scheme/host/port differs from the request's, and even for same-origin
+    redirects strip credential-bearing headers before re-sending (re-adding
+    them only because the origin is known to be the same)."""
+
+    _CREDENTIAL_HEADERS = frozenset(
+        ("authorization", "proxy-authorization", "cookie", "cookie2"))
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(req.full_url) != _origin(newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, "cross-origin redirect blocked", headers, fp)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        # Belt-and-braces: drop credentials from the copied request, then
+        # re-add them for this verified same-origin hop.
+        creds = {}
+        for store in (new.headers, new.unredirected_hdrs):
+            for name in list(store):
+                if name.lower() in self._CREDENTIAL_HEADERS:
+                    creds[name] = store[name]
+                    del store[name]
+        for name, value in creds.items():
+            new.add_header(name, value)
+        return new
+
+
 class Http:
     """Thin urllib wrapper carrying optional HTTP Basic credentials."""
 
     def __init__(self, auth="", timeout=HTTP_TIMEOUT):
         self.auth = auth
         self.timeout = timeout
+        # A private opener so every request (jsonrpc, CometD, cover proxy,
+        # discovery) uses the credential-safe redirect policy above.
+        self._opener = urllib.request.build_opener(
+            _CredentialSafeRedirectHandler())
 
     def request(self, url, method="GET", body=None, ctype=None, limit=MAX_BODY_BYTES):
         headers = {"Accept": "application/json"}
@@ -112,7 +169,7 @@ class Http:
             headers["Authorization"] = self.auth
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as res:
+            with self._opener.open(req, timeout=self.timeout) as res:
                 return self._read_bounded(res, limit)
         except urllib.error.HTTPError as e:
             kind = KIND_AUTH if e.code in (401, 403) else KIND_NETWORK
