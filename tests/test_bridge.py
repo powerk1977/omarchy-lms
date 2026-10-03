@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from fake_lms import COVER_JPEG, FakeLMS  # noqa: E402
+from fake_lms import COVER_JPEG, AttackerServer, FakeLMS  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "bin" / "lms-bridge"
@@ -673,6 +673,56 @@ def test_playmode_set_reorders_queue():
     print("ok playmode set reorders queue")
 
 
+def test_cross_origin_redirect_does_not_leak_auth():
+    """A 3xx to another origin must be refused, never carrying Basic creds.
+
+    Regression for the marketplace finding: urllib's default redirect handler
+    re-sends the original headers (including Authorization) to whatever host a
+    redirect names, so a compromised LMS could harvest the user's password."""
+    fake = FakeLMS().start()
+    attacker = AttackerServer().start()
+    lb = _load_bridge()
+    fake.redirects["/leak"] = "http://127.0.0.1:%d/collect" % attacker.port
+    http = lb.Http(lb.basic_auth("user", "secret"), timeout=5.0)
+    try:
+        failed = False
+        try:
+            http.request("http://127.0.0.1:%d/leak" % fake.port,
+                         method="POST", body=b'{"id":1}',
+                         ctype="application/json")
+        except lb.HttpError as e:
+            failed = True
+            assert e.kind == lb.KIND_NETWORK, e.kind
+        assert failed, "cross-origin redirect was followed"
+        # The security property: no credential ever reaches the attacker.
+        assert attacker.auth_headers() == [], attacker.headers_seen
+        # The hardened handler refuses before contacting the attacker at all.
+        assert attacker.headers_seen == [], attacker.headers_seen
+    finally:
+        fake.stop()
+        attacker.stop()
+    print("ok cross-origin redirect blocked (no auth leak)")
+
+
+def test_same_origin_redirect_preserves_auth():
+    """Same-origin redirects still work and keep the credential.
+
+    The fake requires auth, so a 401 here would mean the handler stripped
+    Authorization without re-adding it for the verified same-origin hop."""
+    fake = FakeLMS(require_auth=("user", "secret")).start()
+    lb = _load_bridge()
+    fake.redirects["/hop"] = (
+        "http://127.0.0.1:%d/music/current/cover.jpg?player=x" % fake.port)
+    http = lb.Http(lb.basic_auth("user", "secret"), timeout=5.0)
+    try:
+        raw = http.request("http://127.0.0.1:%d/hop" % fake.port)
+        assert raw == COVER_JPEG, raw[:16]
+        assert fake.cover_paths, fake.cover_paths
+    finally:
+        fake.stop()
+    print("ok same-origin redirect preserves auth")
+
+
 if __name__ == "__main__":
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     test_demo_sequence()
@@ -691,4 +741,6 @@ if __name__ == "__main__":
     test_queue_clear()
     test_playmode_get_set()
     test_playmode_set_reorders_queue()
+    test_cross_origin_redirect_does_not_leak_auth()
+    test_same_origin_redirect_preserves_auth()
     print("\nall bridge tests passed")

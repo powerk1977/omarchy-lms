@@ -38,6 +38,7 @@ class FakeLMS:
         self.cover_paths = []  # every cover-art request path the bridge proxied
         self.push_channel = ""  # /slim/subscribe response channel the bridge chose
         self.pending_pushes = []  # statuses queued by state-changing commands
+        self.redirects = {}  # request path -> Location URL (302)
         self._server = None
         self._thread = None
         self.port = 0
@@ -248,12 +249,25 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _maybe_redirect(self):
+        """Serve a configured 302 for this path, if any."""
+        target = self.fake.redirects.get(self.path)
+        if not target:
+            return False
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return True
+
     def do_POST(self):  # noqa: N802
         if not self._authorized():
             self._send(401, b'{"error":"unauthorized"}')
             return
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b""
+        if self._maybe_redirect():
+            return
         if self.path.endswith("/cometd"):
             self._handle_cometd(raw)
         elif self.path.endswith("/jsonrpc.js"):
@@ -264,6 +278,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         if not self._authorized():
             self._send(401, b"denied", ctype="text/plain")
+            return
+        if self._maybe_redirect():
             return
         if "cover" in self.path:
             self.fake.cover_paths.append(self.path)
@@ -335,3 +351,67 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):  # silence
         pass
+
+
+class _AttackerHandler(BaseHTTPRequestHandler):
+    """Records every request it receives so tests can prove no credential leak."""
+
+    attacker = None
+
+    def _record(self):
+        self.attacker.headers_seen.append(dict(self.headers.items()))
+        self.attacker.paths.append(self.path)
+
+    def _reply(self):
+        body = b"{}"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        self._record()
+        self._reply()
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        if length:
+            self.rfile.read(length)
+        self._record()
+        self._reply()
+
+    def log_message(self, *args):  # silence
+        pass
+
+
+class AttackerServer:
+    """A second listener standing in for an attacker-controlled origin.
+
+    Records the headers of every request it receives; a hardened bridge must
+    never deliver an Authorization header here."""
+
+    def __init__(self):
+        self.headers_seen = []
+        self.paths = []
+        self._server = None
+        self._thread = None
+        self.port = 0
+
+    def start(self):
+        handler = type("_A", (_AttackerHandler,), {"attacker": self})
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever,
+                                        name="attacker", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        if self._server:
+            self._server.shutdown()
+            self._server.server_close()
+
+    def auth_headers(self):
+        return [h.get("Authorization") for h in self.headers_seen
+                if h.get("Authorization")]
